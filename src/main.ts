@@ -17,10 +17,11 @@ async function bootstrap() {
     await db.ensureReady();
   }
 
-  const port = Number(process.env.PORT ?? 3000);
+  const port = Number(process.env.BACKEND_PORT ?? process.env.PORT ?? 3000);
   const host = process.env.HOST ?? 'localhost';
   const apiPrefix = 'api';
   const corsOrigins = (process.env.CORS_ORIGINS ??
+    process.env.CORS_ORIGIN ??
     'http://localhost:3005,http://127.0.0.1:3005')
     .split(',')
     .map((origin) => origin.trim())
