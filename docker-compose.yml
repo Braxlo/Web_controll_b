@@ -27,12 +27,12 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      PORT: ${PORT:-3000}
+      PORT: ${BACKEND_PORT:-3000}
       INGESTION_SECRET: ${INGESTION_SECRET:-dev_secret_change_me}
       DATABASE_URL: postgresql://${POSTGRES_USER:-hkn}:${POSTGRES_PASSWORD:-hkn_pass}@postgres:5432/${POSTGRES_DB:-hkn_platform}
       INGEST_DATA_DIR: ${INGEST_DATA_DIR:-data}
     ports:
-      - "${BACKEND_PORT:-3000}:3000"
+      - "${BACKEND_PORT:-3000}:${BACKEND_PORT:-3000}"
 
 volumes:
   postgres_data:
