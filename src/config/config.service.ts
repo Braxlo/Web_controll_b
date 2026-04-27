@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { mkdir, readFile, writeFile } from 'fs/promises';
@@ -36,6 +37,7 @@ const DEFAULT_MODULES_CONFIG: ModulesConfigFile = {
 @Injectable()
 export class ConfigService {
   constructor(private readonly db: DatabaseService) {}
+  private readonly logger = new Logger(ConfigService.name);
 
   private readonly registryPath = join(
     process.cwd(),
@@ -168,28 +170,33 @@ export class ConfigService {
 
   async load(): Promise<DeviceRegistryFile> {
     if (this.db.isEnabled()) {
-      const rs = await this.db.query<{
-        device_id: string;
-        name: string;
-        host: string;
-        panel_port: number;
-      }>(
-        `SELECT device_id, name, host, panel_port
-           FROM devices_registry
-          ORDER BY device_id ASC`,
-      );
-      const devices = rs.rows.map((r) =>
-        this.validateDevice({
-          deviceId: r.device_id,
-          name: r.name,
-          host: r.host,
-          panelPort: r.panel_port,
-        }),
-      );
-      if (devices.length === 0) {
-        return structuredClone(DEFAULT_REGISTRY);
+      try {
+        const rs = await this.db.query<{
+          device_id: string;
+          name: string;
+          host: string;
+          panel_port: number;
+        }>(
+          `SELECT device_id, name, host, panel_port
+             FROM devices_registry
+            ORDER BY device_id ASC`,
+        );
+        const devices = rs.rows.map((r) =>
+          this.validateDevice({
+            deviceId: r.device_id,
+            name: r.name,
+            host: r.host,
+            panelPort: r.panel_port,
+          }),
+        );
+        if (devices.length === 0) {
+          return structuredClone(DEFAULT_REGISTRY);
+        }
+        return { devices };
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : 'error desconocido';
+        this.logger.warn(`DB no disponible para devices_registry, usando archivo local: ${msg}`);
       }
-      return { devices };
     }
 
     await mkdir(join(this.registryPath, '..'), { recursive: true });
@@ -252,15 +259,20 @@ export class ConfigService {
 
   async loadModulesConfig(): Promise<ModulesConfigFile> {
     if (this.db.isEnabled()) {
-      const rs = await this.db.query<{ config_value: ModulesConfigFile }>(
-        `SELECT config_value
-           FROM modules_config
-          WHERE config_key = $1`,
-        ['main'],
-      );
-      const row = rs.rows[0];
-      if (!row) return structuredClone(DEFAULT_MODULES_CONFIG);
-      return this.validateModulesConfig(row.config_value);
+      try {
+        const rs = await this.db.query<{ config_value: ModulesConfigFile }>(
+          `SELECT config_value
+             FROM modules_config
+            WHERE config_key = $1`,
+          ['main'],
+        );
+        const row = rs.rows[0];
+        if (!row) return structuredClone(DEFAULT_MODULES_CONFIG);
+        return this.validateModulesConfig(row.config_value);
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : 'error desconocido';
+        this.logger.warn(`DB no disponible para modules_config, usando archivo local: ${msg}`);
+      }
     }
 
     await mkdir(join(this.modulesConfigPath, '..'), { recursive: true });

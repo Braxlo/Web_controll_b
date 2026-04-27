@@ -11,7 +11,7 @@ import type { DeviceRegistryFile } from './device-registry.types';
 import type { ModulesConfigFile } from './modules-config.types';
 import { ConfigService } from './config.service';
 
-@Controller('api/config')
+@Controller('config')
 export class ConfigController {
   constructor(private readonly config: ConfigService) {}
 

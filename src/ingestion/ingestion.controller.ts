@@ -17,7 +17,7 @@ import { IngestionService } from './ingestion.service';
 type CsvBody = { csv: string };
 type CredBody = { id: string; tipo: 'p' | 'v'; nivel: number; usuario?: string };
 
-@Controller('api/ingest')
+@Controller('ingest')
 export class IngestionController {
   constructor(private readonly ingestion: IngestionService) {}
 
