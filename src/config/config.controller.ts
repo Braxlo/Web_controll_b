@@ -8,6 +8,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import type { DeviceRegistryFile } from './device-registry.types';
+import type { ModulesConfigFile } from './modules-config.types';
 import { ConfigService } from './config.service';
 
 @Controller('api/config')
@@ -44,5 +45,19 @@ export class ConfigController {
   @Get('devices/:deviceId/ping')
   async ping(@Param('deviceId') deviceId: string) {
     return this.config.ping(deviceId);
+  }
+
+  @Get('modules')
+  async getModulesConfig() {
+    return this.config.loadModulesConfig();
+  }
+
+  @Put('modules')
+  async putModulesConfig(
+    @Headers() headers: Record<string, string | string[] | undefined>,
+    @Body() body: ModulesConfigFile,
+  ) {
+    this.assertSecret(headers);
+    return this.config.saveModulesConfig(body);
   }
 }
