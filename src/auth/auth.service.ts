@@ -1,5 +1,8 @@
 import {
+  HttpException,
   Injectable,
+  InternalServerErrorException,
+  Logger,
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -9,6 +12,8 @@ import { DatabaseService } from '../database/database.service';
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     private readonly db: DatabaseService,
     private readonly jwt: JwtService,
@@ -25,23 +30,37 @@ export class AuthService {
         'Base de datos no disponible para autenticación',
       );
     }
-    const { rows } = await this.db.query<{
-      password_hash: string;
-      is_active: boolean;
-    }>(
-      `SELECT password_hash, is_active FROM admin_users WHERE username = $1`,
-      [username],
-    );
-    const row = rows[0];
-    if (!row || !row.is_active) {
-      throw new UnauthorizedException('Credenciales invalidas');
+    try {
+      const { rows } = await this.db.query<{
+        password_hash: string;
+        is_active: boolean;
+      }>(
+        `SELECT password_hash, is_active FROM admin_users WHERE username = $1`,
+        [username],
+      );
+      const row = rows[0];
+      if (!row || !row.is_active) {
+        throw new UnauthorizedException('Credenciales invalidas');
+      }
+      const hash = createHash('sha256').update(password).digest('hex');
+      if (hash !== row.password_hash) {
+        throw new UnauthorizedException('Credenciales invalidas');
+      }
+      const accessToken = await this.jwt.signAsync({ sub: username });
+      return { accessToken };
+    } catch (e) {
+      if (e instanceof HttpException) {
+        throw e;
+      }
+      const err = e as Error;
+      this.logger.error(`login interno: ${err.message}`, err.stack);
+      const dev = process.env.NODE_ENV !== 'production';
+      throw new InternalServerErrorException(
+        dev
+          ? `Login falló: ${err.message}`
+          : 'Error interno al iniciar sesión (revise PostgreSQL y tabla admin_users).',
+      );
     }
-    const hash = createHash('sha256').update(password).digest('hex');
-    if (hash !== row.password_hash) {
-      throw new UnauthorizedException('Credenciales invalidas');
-    }
-    const accessToken = await this.jwt.signAsync({ sub: username });
-    return { accessToken };
   }
 
   getSubjectFromUserJwt(
