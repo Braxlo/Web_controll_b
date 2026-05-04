@@ -53,11 +53,33 @@ export class AuthService {
         throw e;
       }
       const err = e as Error;
-      this.logger.error(`login interno: ${err.message}`, err.stack);
+      const msg = err.message ?? '';
+      this.logger.error(`login interno: ${msg}`, err.stack);
+
+      if (
+        /ECONNREFUSED|ETIMEDOUT|ENOTFOUND|getaddrinfo|connect ECONNREFUSED/i.test(
+          msg,
+        ) ||
+        /password authentication failed|no pg_hba.conf entry|too many connections/i.test(
+          msg,
+        ) ||
+        /database .* does not exist|role .* does not exist/i.test(msg)
+      ) {
+        throw new ServiceUnavailableException(
+          'No se pudo conectar a PostgreSQL. Revise DB_HOST, DB_PORT, credenciales y que el contenedor del backend alcance la base de datos.',
+        );
+      }
+
+      if (/relation .* does not exist/i.test(msg)) {
+        throw new ServiceUnavailableException(
+          'Falta el esquema en la base de datos (p. ej. tabla admin_users). Arranque el backend con DB_SYNCHRONIZE=true al menos una vez o aplique las migraciones.',
+        );
+      }
+
       const dev = process.env.NODE_ENV !== 'production';
       throw new InternalServerErrorException(
         dev
-          ? `Login falló: ${err.message}`
+          ? `Login falló: ${msg}`
           : 'Error interno al iniciar sesión (revise PostgreSQL y tabla admin_users).',
       );
     }
@@ -108,7 +130,14 @@ export class AuthService {
     headers: Record<string, string | string[] | undefined>,
   ): string {
     const auth = headers['authorization'];
-    if (typeof auth !== 'string' || !auth.startsWith('Bearer ')) return '';
-    return auth.slice(7).trim();
+    if (typeof auth !== 'string') return '';
+    const trimmed = auth.trim();
+    const m = /^Bearer\s+(.+)$/i.exec(trimmed);
+    if (m) return m[1]!.trim();
+    // Valor crudo sin prefijo (Postman a veces pega solo el secreto en Authorization)
+    if (trimmed.length > 0 && !/\s/.test(trimmed)) {
+      return trimmed;
+    }
+    return '';
   }
 }
