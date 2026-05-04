@@ -18,7 +18,13 @@ import { AuthService } from '../auth/auth.service';
 import { IngestionService } from './ingestion.service';
 
 type CsvBody = { csv: string };
-type CredBody = { id: string; tipo: 'p' | 'v'; nivel: number; usuario?: string };
+type CredBody = {
+  id: string;
+  tipo: 'p' | 'v';
+  nivel: number;
+  usuario?: string;
+};
+type CredSyncBody = { ok?: boolean };
 
 @Controller('ingest')
 export class IngestionController {
@@ -32,7 +38,7 @@ export class IngestionController {
   private getClientIp(req: Request) {
     const forwarded = req.headers['x-forwarded-for'];
     if (typeof forwarded === 'string' && forwarded.trim().length > 0) {
-      return forwarded.split(',')[0]!.trim();
+      return forwarded.split(',')[0].trim();
     }
     if (Array.isArray(forwarded) && forwarded.length > 0) {
       return forwarded[0];
@@ -108,7 +114,11 @@ export class IngestionController {
   ) {
     this.auth.assertPlatformBearer(headers);
     return this.withIngestLog(req, deviceId, () =>
-      this.ingestion.readLog(deviceId, 'log_energia.csv', this.parseLimit(limit)),
+      this.ingestion.readLog(
+        deviceId,
+        'log_energia.csv',
+        this.parseLimit(limit),
+      ),
     );
   }
 
@@ -121,7 +131,11 @@ export class IngestionController {
   ) {
     this.auth.assertPlatformBearer(headers);
     return this.withIngestLog(req, deviceId, () =>
-      this.ingestion.readLog(deviceId, 'log_eventos.csv', this.parseLimit(limit)),
+      this.ingestion.readLog(
+        deviceId,
+        'log_eventos.csv',
+        this.parseLimit(limit),
+      ),
     );
   }
 
@@ -148,11 +162,18 @@ export class IngestionController {
   ) {
     this.auth.assertPlatformBearer(headers);
     await this.withIngestLog(req, deviceId, async () => {
-      const text = await this.ingestion.readRawFile(deviceId, 'credenciales.csv');
+      const text = await this.ingestion.readRawFile(
+        deviceId,
+        'credenciales.csv',
+      );
       const body = text.trim().length > 0 ? text : 'id,tipo,nivel,usuario\n';
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
       res.send(body);
-      return { rows: body.split(/\r?\n/).filter((line) => line.trim().length > 0).length - 1 };
+      return {
+        rows:
+          body.split(/\r?\n/).filter((line) => line.trim().length > 0).length -
+          1,
+      };
     });
   }
 
@@ -217,6 +238,19 @@ export class IngestionController {
     this.auth.assertPlatformBearer(headers);
     return this.withIngestLog(req, deviceId, () =>
       this.ingestion.putCredenciales(deviceId, body?.csv ?? ''),
+    );
+  }
+
+  @Post(':deviceId/credenciales/sync-ack')
+  syncCredencialesAck(
+    @Param('deviceId') deviceId: string,
+    @Headers() headers: Record<string, string | string[] | undefined>,
+    @Body() body: CredSyncBody,
+    @Req() req: Request,
+  ) {
+    this.auth.assertPlatformBearer(headers);
+    return this.withIngestLog(req, deviceId, () =>
+      this.ingestion.markCredentialsSync(deviceId, body?.ok !== false),
     );
   }
 

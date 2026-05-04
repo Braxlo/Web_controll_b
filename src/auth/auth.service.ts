@@ -7,8 +7,16 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { createHash } from 'crypto';
+import { createHash, timingSafeEqual } from 'crypto';
 import { DatabaseService } from '../database/database.service';
+import { LoginRateLimiterService } from './login-rate-limiter.service';
+import { assertLoginInputShape } from './login-security';
+
+const DUMMY_HASH_HEX = '0'.repeat(64);
+
+function isSha256Hex(s: string): boolean {
+  return /^[a-fA-F0-9]{64}$/.test(s);
+}
 
 @Injectable()
 export class AuthService {
@@ -17,20 +25,25 @@ export class AuthService {
   constructor(
     private readonly db: DatabaseService,
     private readonly jwt: JwtService,
+    private readonly loginLimiter: LoginRateLimiterService,
   ) {}
 
-  async login(usernameRaw: string, passwordRaw: string) {
-    const username = usernameRaw.trim();
-    const password = passwordRaw;
-    if (!username || !password) {
-      throw new UnauthorizedException('Usuario y contraseña requeridos');
-    }
-    if (!this.db.isEnabled()) {
-      throw new ServiceUnavailableException(
-        'Base de datos no disponible para autenticación',
-      );
-    }
+  async login(usernameRaw: string, passwordRaw: string, clientKey: string) {
+    this.loginLimiter.assertNotLocked(clientKey);
     try {
+      assertLoginInputShape(usernameRaw, passwordRaw);
+      const username = usernameRaw.trim();
+      const password = passwordRaw;
+      if (!username || !password) {
+        throw new UnauthorizedException('Usuario y contraseña requeridos');
+      }
+
+      if (!this.db.isEnabled()) {
+        throw new ServiceUnavailableException(
+          'Base de datos no disponible para autenticación',
+        );
+      }
+
       const { rows } = await this.db.query<{
         password_hash: string;
         is_active: boolean;
@@ -39,17 +52,30 @@ export class AuthService {
         [username],
       );
       const row = rows[0];
-      if (!row || !row.is_active) {
+
+      const computedHex = createHash('sha256').update(password).digest('hex');
+      const rawStored = (row?.password_hash ?? '').trim();
+      let storedHex = DUMMY_HASH_HEX;
+      if (row?.is_active && isSha256Hex(rawStored)) {
+        storedHex = rawStored.toLowerCase();
+      }
+
+      const ok =
+        Boolean(row?.is_active) &&
+        this.hashesEqualTimingSafe(computedHex, storedHex);
+
+      if (!ok) {
         throw new UnauthorizedException('Credenciales invalidas');
       }
-      const hash = createHash('sha256').update(password).digest('hex');
-      if (hash !== row.password_hash) {
-        throw new UnauthorizedException('Credenciales invalidas');
-      }
+
+      this.loginLimiter.clearFailures(clientKey);
       const accessToken = await this.jwt.signAsync({ sub: username });
       return { accessToken };
     } catch (e) {
       if (e instanceof HttpException) {
+        if (e instanceof UnauthorizedException) {
+          this.loginLimiter.registerFailure(clientKey.trim() || 'unknown');
+        }
         throw e;
       }
       const err = e as Error;
@@ -82,6 +108,17 @@ export class AuthService {
           ? `Login falló: ${msg}`
           : 'Error interno al iniciar sesión (revise PostgreSQL y tabla admin_users).',
       );
+    }
+  }
+
+  private hashesEqualTimingSafe(aHex: string, bHex: string): boolean {
+    try {
+      const a = Buffer.from(aHex, 'hex');
+      const b = Buffer.from(bHex, 'hex');
+      if (a.length !== b.length) return false;
+      return timingSafeEqual(a, b);
+    } catch {
+      return false;
     }
   }
 
@@ -133,8 +170,7 @@ export class AuthService {
     if (typeof auth !== 'string') return '';
     const trimmed = auth.trim();
     const m = /^Bearer\s+(.+)$/i.exec(trimmed);
-    if (m) return m[1]!.trim();
-    // Valor crudo sin prefijo (Postman a veces pega solo el secreto en Authorization)
+    if (m) return m[1].trim();
     if (trimmed.length > 0 && !/\s/.test(trimmed)) {
       return trimmed;
     }

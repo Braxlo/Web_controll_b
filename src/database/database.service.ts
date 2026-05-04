@@ -15,7 +15,9 @@ export class DatabaseService {
   private readonly url = this.resolveConnectionString();
   private readonly enabled = this.url.length > 0;
   private readonly synchronize = this.resolveSynchronizeFlag();
-  private readonly pool = this.enabled ? new Pool({ connectionString: this.url }) : null;
+  private readonly pool = this.enabled
+    ? new Pool({ connectionString: this.url })
+    : null;
   private initPromise: Promise<void> | null = null;
 
   isEnabled() {
@@ -167,16 +169,20 @@ export class DatabaseService {
       .filter((f) => f.endsWith('.sql'))
       .sort();
     for (const name of names) {
-      const done = await this.pool.query(`SELECT 1 FROM schema_migrations WHERE version = $1`, [
-        name,
-      ]);
+      const done = await this.pool.query(
+        `SELECT 1 FROM schema_migrations WHERE version = $1`,
+        [name],
+      );
       if ((done.rowCount ?? 0) > 0) continue;
       const sql = readFileSync(join(dir, name), 'utf8');
       const client = await this.pool.connect();
       try {
         await client.query('BEGIN');
         await client.query(sql);
-        await client.query(`INSERT INTO schema_migrations (version) VALUES ($1)`, [name]);
+        await client.query(
+          `INSERT INTO schema_migrations (version) VALUES ($1)`,
+          [name],
+        );
         await client.query('COMMIT');
         this.logger.log(`Migracion aplicada: ${name}`);
       } catch (e) {
@@ -218,6 +224,11 @@ export class DatabaseService {
         name TEXT NOT NULL,
         host TEXT NOT NULL,
         panel_port INT NOT NULL,
+        api_key TEXT NOT NULL,
+        connection_status TEXT NOT NULL DEFAULT 'pending',
+        last_seen_at TIMESTAMPTZ NULL,
+        credentials_version INT NOT NULL DEFAULT 1,
+        credentials_sync_status TEXT NOT NULL DEFAULT 'pending',
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
       );
     `);
@@ -289,9 +300,15 @@ export class DatabaseService {
         created_at TIMESTAMPTZ NOT NULL DEFAULT now()
       );
     `);
-    await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_log_energia_device_pk ON log_energia(device_id, pk DESC);`);
-    await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_log_eventos_device_pk ON log_eventos(device_id, pk DESC);`);
-    await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_log_hw_device_pk ON log_hw(device_id, pk DESC);`);
+    await this.pool.query(
+      `CREATE INDEX IF NOT EXISTS idx_log_energia_device_pk ON log_energia(device_id, pk DESC);`,
+    );
+    await this.pool.query(
+      `CREATE INDEX IF NOT EXISTS idx_log_eventos_device_pk ON log_eventos(device_id, pk DESC);`,
+    );
+    await this.pool.query(
+      `CREATE INDEX IF NOT EXISTS idx_log_hw_device_pk ON log_hw(device_id, pk DESC);`,
+    );
     await this.ensureDefaultAdmin();
     this.logger.log(
       'Esquema DB verificado: devices_registry, modules_config, admin_users, credenciales, log_energia, log_eventos, log_hw.',

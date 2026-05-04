@@ -3,10 +3,10 @@ import { createHash } from 'crypto';
 import { appendFile, mkdir, readFile, writeFile } from 'fs/promises';
 import type { PoolClient } from 'pg';
 import { join } from 'path';
+import { ConfigService } from '../config/config.service';
 import { DatabaseService } from '../database/database.service';
 
-const ENERGIA_HEADER =
-  'timestamp,VS,CS,SW,VB,CB,LV,LC,LP';
+const ENERGIA_HEADER = 'timestamp,VS,CS,SW,VB,CB,LV,LC,LP';
 const EVENTOS_HEADER =
   'fecha,id_persona,usuario_persona,id_vehiculo,usuario_vehiculo,resultado,direccion';
 const HW_HEADER = 'fecha,lectora,evento';
@@ -14,7 +14,10 @@ const CRED_HEADER = 'id,tipo,nivel,usuario';
 
 @Injectable()
 export class IngestionService {
-  constructor(private readonly db: DatabaseService) {}
+  constructor(
+    private readonly db: DatabaseService,
+    private readonly config: ConfigService,
+  ) {}
 
   private readonly dataRoot = join(
     process.cwd(),
@@ -34,14 +37,19 @@ export class IngestionService {
 
   async putCredenciales(deviceId: string, csv: string) {
     if (this.db.isEnabled()) {
-      const rows = this.parseCsvByHeader(this.normalizeCsv(csv, CRED_HEADER), CRED_HEADER);
+      const rows = this.parseCsvByHeader(
+        this.normalizeCsv(csv, CRED_HEADER),
+        CRED_HEADER,
+      );
       if (rows.length === 0) {
         throw new BadRequestException(
           'credenciales sin filas de datos: se rechaza para evitar vaciar la barrera',
         );
       }
       await this.db.withTransaction(async (client: PoolClient) => {
-        await client.query(`DELETE FROM credenciales WHERE device_id = $1`, [deviceId]);
+        await client.query(`DELETE FROM credenciales WHERE device_id = $1`, [
+          deviceId,
+        ]);
         for (const r of rows) {
           await client.query(
             `INSERT INTO credenciales (device_id, id, tipo, nivel, usuario, updated_at)
@@ -56,12 +64,20 @@ export class IngestionService {
           );
         }
       });
-      return { ok: true, file: 'credenciales.csv', rows: rows.length };
+      const result = { ok: true, file: 'credenciales.csv', rows: rows.length };
+      await this.config.markCredentialsPending(deviceId);
+      return result;
     }
     const dir = await this.ensureDir(deviceId);
     const text = this.normalizeCsv(csv, CRED_HEADER);
     await writeFile(join(dir, 'credenciales.csv'), text, 'utf8');
-    return { ok: true, file: 'credenciales.csv', bytes: Buffer.byteLength(text) };
+    const result = {
+      ok: true,
+      file: 'credenciales.csv',
+      bytes: Buffer.byteLength(text),
+    };
+    await this.config.markCredentialsPending(deviceId);
+    return result;
   }
 
   async listCredenciales(deviceId: string) {
@@ -119,6 +135,7 @@ export class IngestionService {
          DO UPDATE SET tipo = EXCLUDED.tipo, nivel = EXCLUDED.nivel, usuario = EXCLUDED.usuario, updated_at = now()`,
         [deviceId, id, tipo, nivel, usuario],
       );
+      await this.config.markCredentialsPending(deviceId);
       return { ok: true, deviceId, id };
     }
 
@@ -126,8 +143,15 @@ export class IngestionService {
     const rows = current.rows.filter((r) => r.id !== id);
     rows.push({ id, tipo, nivel, usuario });
     rows.sort((a, b) => (a.id > b.id ? 1 : -1));
-    const csv = [CRED_HEADER, ...rows.map((r) => `${r.id},${r.tipo},${r.nivel},${(r.usuario ?? '').replace(/,/g, ' ')}`)].join('\n');
+    const csv = [
+      CRED_HEADER,
+      ...rows.map(
+        (r) =>
+          `${r.id},${r.tipo},${r.nivel},${(r.usuario ?? '').replace(/,/g, ' ')}`,
+      ),
+    ].join('\n');
     await this.putCredenciales(deviceId, csv);
+    await this.config.markCredentialsPending(deviceId);
     return { ok: true, deviceId, id };
   }
 
@@ -141,6 +165,7 @@ export class IngestionService {
         `DELETE FROM credenciales WHERE device_id = $1 AND id = $2`,
         [deviceId, id],
       );
+      await this.config.markCredentialsPending(deviceId);
       return { ok: true, deviceId, deletedId: id };
     }
 
@@ -148,52 +173,108 @@ export class IngestionService {
     const rows = current.rows.filter((r) => r.id !== id);
     const csv = [
       CRED_HEADER,
-      ...rows.map((r) => `${r.id},${r.tipo},${r.nivel},${(r.usuario ?? '').replace(/,/g, ' ')}`),
+      ...rows.map(
+        (r) =>
+          `${r.id},${r.tipo},${r.nivel},${(r.usuario ?? '').replace(/,/g, ' ')}`,
+      ),
     ].join('\n');
     await this.putCredenciales(deviceId, csv);
+    await this.config.markCredentialsPending(deviceId);
     return { ok: true, deviceId, deletedId: id };
   }
 
   async appendEnergia(deviceId: string, csv: string) {
     if (this.db.isEnabled()) {
-      return this.insertEnergiaRows(deviceId, csv, false);
+      const out = await this.insertEnergiaRows(deviceId, csv, false);
+      await this.touchDeviceSeen(deviceId);
+      return out;
     }
-    return this.appendCsv(deviceId, 'log_energia.csv', csv, ENERGIA_HEADER);
+    const out = await this.appendCsv(
+      deviceId,
+      'log_energia.csv',
+      csv,
+      ENERGIA_HEADER,
+    );
+    await this.touchDeviceSeen(deviceId);
+    return out;
   }
 
   async appendEventos(deviceId: string, csv: string) {
     if (this.db.isEnabled()) {
-      return this.insertEventosRows(deviceId, csv, false);
+      const out = await this.insertEventosRows(deviceId, csv, false);
+      await this.touchDeviceSeen(deviceId);
+      return out;
     }
-    return this.appendCsv(deviceId, 'log_eventos.csv', csv, EVENTOS_HEADER);
+    const out = await this.appendCsv(
+      deviceId,
+      'log_eventos.csv',
+      csv,
+      EVENTOS_HEADER,
+    );
+    await this.touchDeviceSeen(deviceId);
+    return out;
   }
 
   async appendHardware(deviceId: string, csv: string) {
     if (this.db.isEnabled()) {
-      return this.insertHwRows(deviceId, csv, false);
+      const out = await this.insertHwRows(deviceId, csv, false);
+      await this.touchDeviceSeen(deviceId);
+      return out;
     }
-    return this.appendCsv(deviceId, 'log_hw.csv', csv, HW_HEADER);
+    const out = await this.appendCsv(deviceId, 'log_hw.csv', csv, HW_HEADER);
+    await this.touchDeviceSeen(deviceId);
+    return out;
   }
 
   async putEnergia(deviceId: string, csv: string) {
     if (this.db.isEnabled()) {
-      return this.insertEnergiaRows(deviceId, csv, true);
+      const out = await this.insertEnergiaRows(deviceId, csv, true);
+      await this.touchDeviceSeen(deviceId);
+      return out;
     }
-    return this.putWhole(deviceId, 'log_energia.csv', csv, ENERGIA_HEADER);
+    const out = await this.putWhole(
+      deviceId,
+      'log_energia.csv',
+      csv,
+      ENERGIA_HEADER,
+    );
+    await this.touchDeviceSeen(deviceId);
+    return out;
   }
 
   async putEventos(deviceId: string, csv: string) {
     if (this.db.isEnabled()) {
-      return this.insertEventosRows(deviceId, csv, true);
+      const out = await this.insertEventosRows(deviceId, csv, true);
+      await this.touchDeviceSeen(deviceId);
+      return out;
     }
-    return this.putWhole(deviceId, 'log_eventos.csv', csv, EVENTOS_HEADER);
+    const out = await this.putWhole(
+      deviceId,
+      'log_eventos.csv',
+      csv,
+      EVENTOS_HEADER,
+    );
+    await this.touchDeviceSeen(deviceId);
+    return out;
   }
 
   async putHardware(deviceId: string, csv: string) {
     if (this.db.isEnabled()) {
-      return this.insertHwRows(deviceId, csv, true);
+      const out = await this.insertHwRows(deviceId, csv, true);
+      await this.touchDeviceSeen(deviceId);
+      return out;
     }
-    return this.putWhole(deviceId, 'log_hw.csv', csv, HW_HEADER);
+    const out = await this.putWhole(deviceId, 'log_hw.csv', csv, HW_HEADER);
+    await this.touchDeviceSeen(deviceId);
+    return out;
+  }
+
+  async markCredentialsSync(deviceId: string, ok: boolean) {
+    return this.config.markCredentialsSynced(deviceId, ok ? 'synced' : 'error');
+  }
+
+  private async touchDeviceSeen(deviceId: string) {
+    await this.config.markDeviceOnline(deviceId);
   }
 
   private async ensureDir(deviceId: string) {
@@ -250,12 +331,22 @@ export class IngestionService {
     });
   }
 
-  private async insertEnergiaRows(deviceId: string, csv: string, replace: boolean) {
-    const rows = this.parseCsvByHeader(this.normalizeCsv(csv, ENERGIA_HEADER), ENERGIA_HEADER);
+  private async insertEnergiaRows(
+    deviceId: string,
+    csv: string,
+    replace: boolean,
+  ) {
+    const rows = this.parseCsvByHeader(
+      this.normalizeCsv(csv, ENERGIA_HEADER),
+      ENERGIA_HEADER,
+    );
     let inserted = 0;
     let skipped = 0;
     await this.db.withTransaction(async (client: PoolClient) => {
-      if (replace) await client.query(`DELETE FROM log_energia WHERE device_id = $1`, [deviceId]);
+      if (replace)
+        await client.query(`DELETE FROM log_energia WHERE device_id = $1`, [
+          deviceId,
+        ]);
       for (const r of rows) {
         const ts = (r.timestamp ?? '').trim();
         const vs = Number.parseFloat(r.VS ?? '0') || 0;
@@ -307,12 +398,22 @@ export class IngestionService {
     };
   }
 
-  private async insertEventosRows(deviceId: string, csv: string, replace: boolean) {
-    const rows = this.parseCsvByHeader(this.normalizeCsv(csv, EVENTOS_HEADER), EVENTOS_HEADER);
+  private async insertEventosRows(
+    deviceId: string,
+    csv: string,
+    replace: boolean,
+  ) {
+    const rows = this.parseCsvByHeader(
+      this.normalizeCsv(csv, EVENTOS_HEADER),
+      EVENTOS_HEADER,
+    );
     let inserted = 0;
     let skipped = 0;
     await this.db.withTransaction(async (client: PoolClient) => {
-      if (replace) await client.query(`DELETE FROM log_eventos WHERE device_id = $1`, [deviceId]);
+      if (replace)
+        await client.query(`DELETE FROM log_eventos WHERE device_id = $1`, [
+          deviceId,
+        ]);
       for (const r of rows) {
         const fecha = (r.fecha ?? '').trim();
         const idPersona = (r.id_persona ?? '').trim();
@@ -381,11 +482,17 @@ export class IngestionService {
   }
 
   private async insertHwRows(deviceId: string, csv: string, replace: boolean) {
-    const rows = this.parseCsvByHeader(this.normalizeCsv(csv, HW_HEADER), HW_HEADER);
+    const rows = this.parseCsvByHeader(
+      this.normalizeCsv(csv, HW_HEADER),
+      HW_HEADER,
+    );
     let inserted = 0;
     let skipped = 0;
     await this.db.withTransaction(async (client: PoolClient) => {
-      if (replace) await client.query(`DELETE FROM log_hw WHERE device_id = $1`, [deviceId]);
+      if (replace)
+        await client.query(`DELETE FROM log_hw WHERE device_id = $1`, [
+          deviceId,
+        ]);
       for (const r of rows) {
         const fecha = (r.fecha ?? '').trim();
         const lectora = (r.lectora ?? '').trim();
@@ -432,10 +539,15 @@ export class IngestionService {
     if (!raw) {
       throw new BadRequestException('csv vacio');
     }
-    const lines = raw.split(/\r?\n/).map((l) => l.trimEnd()).filter((l) => l.length > 0);
+    const lines = raw
+      .split(/\r?\n/)
+      .map((l) => l.trimEnd())
+      .filter((l) => l.length > 0);
     const dataLines = this.stripHeaderIfPresent(lines, header);
     if (dataLines.length === 0) {
-      throw new BadRequestException('sin filas de datos despues de la cabecera');
+      throw new BadRequestException(
+        'sin filas de datos despues de la cabecera',
+      );
     }
     let exists = true;
     try {
@@ -446,7 +558,9 @@ export class IngestionService {
     if (!exists) {
       await writeFile(path, `${header}\n`, 'utf8');
     }
-    const block = dataLines.map((l) => (l.endsWith('\n') ? l : `${l}\n`)).join('');
+    const block = dataLines
+      .map((l) => (l.endsWith('\n') ? l : `${l}\n`))
+      .join('');
     await appendFile(path, block, 'utf8');
     return {
       ok: true,
@@ -473,7 +587,11 @@ export class IngestionService {
       .map((l) => l.trimEnd())
       .filter((l) => l.length > 0);
     if (lines.length === 0) {
-      return { columns: [] as string[], rows: [] as Record<string, string>[], totalRows: 0 };
+      return {
+        columns: [] as string[],
+        rows: [] as Record<string, string>[],
+        totalRows: 0,
+      };
     }
     const headerCells = lines[0].split(',').map((c) => c.trim());
     const dataLines = lines.slice(1);
@@ -495,7 +613,8 @@ export class IngestionService {
     if (this.db.isEnabled() && filename === 'credenciales.csv') {
       const listed = await this.listCredenciales(deviceId);
       const lines = listed.rows.map(
-        (r) => `${r.id},${r.tipo},${r.nivel},${(r.usuario ?? '').replace(/,/g, ' ')}`,
+        (r) =>
+          `${r.id},${r.tipo},${r.nivel},${(r.usuario ?? '').replace(/,/g, ' ')}`,
       );
       return [CRED_HEADER, ...lines].join('\n') + '\n';
     }
@@ -511,7 +630,12 @@ export class IngestionService {
     if (this.db.isEnabled()) {
       const cap = Math.min(Math.max(1, limit), 5000);
       if (filename === 'credenciales.csv') {
-        const rs = await this.db.query<{ id: string; tipo: string; nivel: number; usuario: string }>(
+        const rs = await this.db.query<{
+          id: string;
+          tipo: string;
+          nivel: number;
+          usuario: string;
+        }>(
           `SELECT id, tipo, nivel, usuario
              FROM credenciales
             WHERE device_id = $1
@@ -548,8 +672,24 @@ export class IngestionService {
         return {
           deviceId,
           file: filename,
-          columns: ['timestamp', 'VS', 'CS', 'SW', 'VB', 'CB', 'LV', 'LC', 'LP'],
-          rows: [...rs.rows].reverse().map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, String(v ?? '')]))),
+          columns: [
+            'timestamp',
+            'VS',
+            'CS',
+            'SW',
+            'VB',
+            'CB',
+            'LV',
+            'LC',
+            'LP',
+          ],
+          rows: [...rs.rows]
+            .reverse()
+            .map((r) =>
+              Object.fromEntries(
+                Object.entries(r).map(([k, v]) => [k, String(v ?? '')]),
+              ),
+            ),
           totalRows: Number.parseInt(total.rows[0]?.count ?? '0', 10),
         };
       }
@@ -569,8 +709,22 @@ export class IngestionService {
         return {
           deviceId,
           file: filename,
-          columns: ['fecha', 'id_persona', 'usuario_persona', 'id_vehiculo', 'usuario_vehiculo', 'resultado', 'direccion'],
-          rows: [...rs.rows].reverse().map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, String(v ?? '')]))),
+          columns: [
+            'fecha',
+            'id_persona',
+            'usuario_persona',
+            'id_vehiculo',
+            'usuario_vehiculo',
+            'resultado',
+            'direccion',
+          ],
+          rows: [...rs.rows]
+            .reverse()
+            .map((r) =>
+              Object.fromEntries(
+                Object.entries(r).map(([k, v]) => [k, String(v ?? '')]),
+              ),
+            ),
           totalRows: Number.parseInt(total.rows[0]?.count ?? '0', 10),
         };
       }
@@ -591,7 +745,13 @@ export class IngestionService {
           deviceId,
           file: filename,
           columns: ['fecha', 'lectora', 'evento'],
-          rows: [...rs.rows].reverse().map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, String(v ?? '')]))),
+          rows: [...rs.rows]
+            .reverse()
+            .map((r) =>
+              Object.fromEntries(
+                Object.entries(r).map(([k, v]) => [k, String(v ?? '')]),
+              ),
+            ),
           totalRows: Number.parseInt(total.rows[0]?.count ?? '0', 10),
         };
       }

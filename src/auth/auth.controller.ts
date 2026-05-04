@@ -5,10 +5,12 @@ import {
   Headers,
   HttpCode,
   HttpStatus,
+  Ip,
   Post,
   UnauthorizedException,
 } from '@nestjs/common';
 import { AuthService } from './auth.service';
+import { readLoginBody } from './login-security';
 
 @Controller('auth')
 export class AuthController {
@@ -16,8 +18,15 @@ export class AuthController {
 
   @Post('login')
   @HttpCode(HttpStatus.OK)
-  async login(@Body() body: { username?: string; password?: string }) {
-    return this.auth.login(body.username ?? '', body.password ?? '');
+  async login(@Body() body: unknown, @Ip() ip: string) {
+    const { username, password } = readLoginBody(body);
+    return this.auth.login(username, password, this.clientRateLimitKey(ip));
+  }
+
+  /** IP del request (mejor con `trust proxy` en Express detrás de un reverse proxy). */
+  private clientRateLimitKey(ip: string): string {
+    const v = (ip ?? '').trim();
+    return v.length > 0 ? v : 'unknown';
   }
 
   @Get('me')

@@ -13,6 +13,11 @@ async function bootstrap() {
     }
   }
   const app = await NestFactory.create(AppModule);
+  const expressApp = app.getHttpAdapter().getInstance() as {
+    set?: (k: string, v: unknown) => void;
+  };
+  /** Primera hop X-Forwarded-For (Nginx / Docker) para `@Ip()` en login. */
+  expressApp?.set?.('trust proxy', process.env.TRUST_PROXY ?? '1');
   app.use(json({ limit: '20mb' }));
   app.use(urlencoded({ extended: true, limit: '20mb' }));
   const db = app.get(DatabaseService);
@@ -21,15 +26,18 @@ async function bootstrap() {
   }
 
   const port = (() => {
-    const raw = `${process.env.BACKEND_PORT ?? process.env.PORT ?? '3000'}`.trim();
+    const raw =
+      `${process.env.BACKEND_PORT ?? process.env.PORT ?? '3000'}`.trim();
     const n = Number(raw);
     return Number.isFinite(n) && n > 0 ? n : 3000;
   })();
   const host = process.env.HOST ?? 'localhost';
   const apiPrefix = 'api';
-  const corsOrigins = (process.env.CORS_ORIGINS ??
+  const corsOrigins = (
+    process.env.CORS_ORIGINS ??
     process.env.CORS_ORIGIN ??
-    'http://localhost:3005,http://127.0.0.1:3005')
+    'http://localhost:3011,http://127.0.0.1:3011'
+  )
     .split(',')
     .map((origin) => origin.trim())
     .filter(Boolean);

@@ -4,6 +4,10 @@ import type { DeviceRegistryFile } from './device-registry.types';
 import type { ModulesConfigFile } from './modules-config.types';
 import { ConfigService } from './config.service';
 
+type HeartbeatBody = {
+  apiKey: string;
+};
+
 @Controller('config')
 export class ConfigController {
   constructor(
@@ -28,6 +32,14 @@ export class ConfigController {
   @Get('devices/:deviceId/ping')
   async ping(@Param('deviceId') deviceId: string) {
     return this.config.ping(deviceId);
+  }
+
+  @Put('devices/:deviceId/heartbeat')
+  async heartbeat(
+    @Param('deviceId') deviceId: string,
+    @Body() body: HeartbeatBody,
+  ) {
+    return this.config.heartbeat(deviceId, body?.apiKey ?? '');
   }
 
   @Get('modules')
