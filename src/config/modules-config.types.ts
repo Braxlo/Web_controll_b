@@ -10,8 +10,15 @@ export type MqttModuleConfig = {
   topics: MqttTopicConfig[];
 };
 
+export type BarrierLocation = {
+  id: string;
+  name: string;
+};
+
 export type BarrierControlConfig = {
   area: string;
+  /** Si existe en `barriers.locations`, el servidor sincroniza `area` con el nombre de la ubicación. */
+  locationId?: string;
   topic: string;
   cmdOpen: string;
   cmdClose: string;
@@ -23,6 +30,7 @@ export type BarrierControlConfig = {
 
 export type BarriersModuleConfig = {
   activeDeviceId: string;
+  locations: BarrierLocation[];
   controlsByDeviceId: Record<string, BarrierControlConfig>;
 };
 

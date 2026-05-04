@@ -15,6 +15,7 @@ import type {
 } from './device-registry.types';
 import type {
   BarrierControlConfig,
+  BarrierLocation,
   ModulesConfigFile,
   SignboardConfig,
 } from './modules-config.types';
@@ -31,6 +32,7 @@ const DEFAULT_MODULES_CONFIG: ModulesConfigFile = {
   },
   barriers: {
     activeDeviceId: '',
+    locations: [],
     controlsByDeviceId: {},
   },
   signboards: {
@@ -139,9 +141,25 @@ export class ConfigService {
     return d.toISOString();
   }
 
+  private validateBarrierLocation(raw: unknown): BarrierLocation {
+    const o = raw as Partial<BarrierLocation>;
+    const id = (o?.id ?? '').trim();
+    if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
+      throw new BadRequestException(
+        'id de ubicacion invalido: solo letras, numeros, guion y underscore',
+      );
+    }
+    const name = (o?.name ?? '').trim();
+    if (!name) {
+      throw new BadRequestException('nombre de ubicacion requerido');
+    }
+    return { id, name };
+  }
+
   private validateBarrierControl(
     deviceId: string,
     raw: Partial<BarrierControlConfig> | undefined,
+    locationsById: Map<string, BarrierLocation>,
   ): BarrierControlConfig {
     const id = deviceId.trim();
     if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
@@ -153,8 +171,21 @@ export class ConfigService {
     if (!['arriba', 'abajo', 'desconocido'].includes(lastState)) {
       throw new BadRequestException(`lastState invalido para ${deviceId}`);
     }
-    return {
-      area: (raw?.area ?? '').trim(),
+    let locationId = (raw?.locationId ?? '').trim();
+    let area = (raw?.area ?? '').trim();
+    if (locationId) {
+      const loc = locationsById.get(locationId);
+      if (!loc) {
+        throw new BadRequestException(
+          `ubicacion '${locationId}' no existe (barrera ${id})`,
+        );
+      }
+      area = loc.name;
+    } else {
+      locationId = '';
+    }
+    const out: BarrierControlConfig = {
+      area,
       topic: (raw?.topic ?? `barreras/control/${id}`).trim(),
       cmdOpen: (raw?.cmdOpen ?? 'barreras/cmd/abrir').trim(),
       cmdClose: (raw?.cmdClose ?? 'barreras/cmd/cerrar').trim(),
@@ -163,6 +194,10 @@ export class ConfigService {
       cameraStreamUrl: (raw?.cameraStreamUrl ?? '').trim(),
       lastState: lastState,
     };
+    if (locationId) {
+      out.locationId = locationId;
+    }
+    return out;
   }
 
   private validateSignboard(raw: SignboardConfig): SignboardConfig {
@@ -210,10 +245,27 @@ export class ConfigService {
       seenTopicIds.add(t.id);
     }
 
+    const rawLocs = Array.isArray(raw?.barriers?.locations)
+      ? raw.barriers.locations
+      : [];
+    const locations = rawLocs.map((x) => this.validateBarrierLocation(x));
+    const seenLocIds = new Set<string>();
+    for (const loc of locations) {
+      if (seenLocIds.has(loc.id)) {
+        throw new BadRequestException(`ubicacion id duplicado: ${loc.id}`);
+      }
+      seenLocIds.add(loc.id);
+    }
+    const locationsById = new Map(locations.map((l) => [l.id, l] as const));
+
     const controlsByDeviceId: Record<string, BarrierControlConfig> = {};
     const rawControls = raw?.barriers?.controlsByDeviceId ?? {};
     for (const [deviceId, cfg] of Object.entries(rawControls)) {
-      controlsByDeviceId[deviceId] = this.validateBarrierControl(deviceId, cfg);
+      controlsByDeviceId[deviceId] = this.validateBarrierControl(
+        deviceId,
+        cfg,
+        locationsById,
+      );
     }
 
     const rawItems = Array.isArray(raw?.signboards?.items)
@@ -232,6 +284,7 @@ export class ConfigService {
       mqtt,
       barriers: {
         activeDeviceId: raw?.barriers?.activeDeviceId?.trim() ?? '',
+        locations,
         controlsByDeviceId,
       },
       signboards: {
