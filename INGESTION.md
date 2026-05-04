@@ -100,12 +100,11 @@ Misma regla de `Authorization` si `INGESTION_SECRET` está definido.
 
 `rows` son objetos `{ cabecera: valor }` por fila (últimas `limit` filas de datos).
 
-### Frontend (proxy Next)
+### Frontend (panel Next)
 
-El frontend llama a rutas relativas `/api/backend/...`, que reenvían al Nest usando variables de entorno **solo en servidor**:
+El navegador y axios usan `NEXT_PUBLIC_API_URL` (Nest, sin `/api`). Rutas API de Next (`/api/auth/me`, etc.) usan la misma variable en servidor.
 
-- `BACKEND_URL` — URL del Nest (ej. `http://127.0.0.1:3000`)
-- `INGESTION_SECRET` — opcional, mismo valor que en el backend
+- `INGESTION_SECRET` — opcional en frontend, mismo valor que en el backend si aplica
 
 Ver `Plataforma/frontend/.env.example`.
 
