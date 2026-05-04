@@ -20,7 +20,11 @@ async function bootstrap() {
     await db.ensureReady();
   }
 
-  const port = Number(process.env.BACKEND_PORT ?? process.env.PORT ?? 3000);
+  const port = (() => {
+    const raw = `${process.env.BACKEND_PORT ?? process.env.PORT ?? '3000'}`.trim();
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : 3000;
+  })();
   const host = process.env.HOST ?? 'localhost';
   const apiPrefix = 'api';
   const corsOrigins = (process.env.CORS_ORIGINS ??
