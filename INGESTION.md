@@ -102,7 +102,7 @@ Misma regla de `Authorization` si `INGESTION_SECRET` está definido.
 
 ### Frontend (panel Next)
 
-El navegador y axios usan `NEXT_PUBLIC_API_URL` (Nest, sin `/api`). Rutas API de Next (`/api/auth/me`, etc.) usan la misma variable en servidor.
+El navegador y axios usan `NEXT_PUBLIC_API_URL` (Nest, sin `/api`). El panel llama al Nest en `GET /api/health` y `GET /api/auth/me` (no hay proxy Next para esas dos).
 
 - `INGESTION_SECRET` — opcional en frontend, mismo valor que en el backend si aplica
 
