@@ -1,4 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { existsSync, readFileSync, readdirSync } from 'fs';
+import { join } from 'path';
 import {
   Pool,
   type PoolClient,
@@ -26,12 +28,16 @@ export class DatabaseService {
       this.logger.log(
         `Base de datos habilitada (DB_SYNCHRONIZE=${this.synchronize ? 'true' : 'false'})`,
       );
-      this.initPromise = this.synchronize ? this.initSchema() : Promise.resolve();
-      if (!this.synchronize) {
-        this.logger.log(
-          'DB_SYNCHRONIZE=false: se omite la creación/verificación automática de tablas.',
-        );
-      }
+      this.initPromise = (async () => {
+        if (this.synchronize) {
+          await this.initSchema();
+        } else {
+          this.logger.log(
+            'DB_SYNCHRONIZE=false: se omite la creación/verificación automática de tablas.',
+          );
+        }
+        await this.runPendingMigrations();
+      })();
     }
     await this.initPromise;
   }
@@ -70,6 +76,51 @@ export class DatabaseService {
     }
   }
 
+  async healthCheck() {
+    if (!this.pool) {
+      return {
+        enabled: false,
+        ok: true,
+        latencyMs: 0,
+        tables: {} as Record<string, boolean>,
+      };
+    }
+
+    const startedAt = Date.now();
+    await this.ensureReady();
+    await this.pool.query('SELECT 1');
+
+    const requiredTables = [
+      'devices_registry',
+      'modules_config',
+      'admin_users',
+      'credenciales',
+      'log_energia',
+      'log_eventos',
+      'log_hw',
+    ] as const;
+
+    const existing = await this.pool.query<{ tablename: string }>(
+      `SELECT tablename
+         FROM pg_tables
+        WHERE schemaname = 'public'
+          AND tablename = ANY($1::text[])`,
+      [requiredTables],
+    );
+
+    const existingSet = new Set(existing.rows.map((r) => r.tablename));
+    const tables = Object.fromEntries(
+      requiredTables.map((name) => [name, existingSet.has(name)]),
+    ) as Record<string, boolean>;
+
+    return {
+      enabled: true,
+      ok: Object.values(tables).every(Boolean),
+      latencyMs: Date.now() - startedAt,
+      tables,
+    };
+  }
+
   private resolveConnectionString() {
     const direct = process.env.DATABASE_URL?.trim() ?? '';
     if (direct.length > 0) return direct;
@@ -87,6 +138,55 @@ export class DatabaseService {
     const raw = process.env.DB_SYNCHRONIZE?.trim().toLowerCase();
     if (!raw) return true;
     return raw === 'true' || raw === '1' || raw === 'yes';
+  }
+
+  private resolveRunMigrationsFlag() {
+    const raw = process.env.DB_RUN_MIGRATIONS?.trim().toLowerCase();
+    if (!raw) return true;
+    return raw === 'true' || raw === '1' || raw === 'yes';
+  }
+
+  private async runPendingMigrations() {
+    if (!this.pool) return;
+    if (!this.resolveRunMigrationsFlag()) {
+      this.logger.warn('DB_RUN_MIGRATIONS=false: se omiten migraciones SQL.');
+      return;
+    }
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        version TEXT PRIMARY KEY,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `);
+    const dir = join(__dirname, 'migrations');
+    if (!existsSync(dir)) {
+      this.logger.warn(`Carpeta de migraciones no encontrada: ${dir}`);
+      return;
+    }
+    const names = readdirSync(dir)
+      .filter((f) => f.endsWith('.sql'))
+      .sort();
+    for (const name of names) {
+      const done = await this.pool.query(`SELECT 1 FROM schema_migrations WHERE version = $1`, [
+        name,
+      ]);
+      if ((done.rowCount ?? 0) > 0) continue;
+      const sql = readFileSync(join(dir, name), 'utf8');
+      const client = await this.pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(sql);
+        await client.query(`INSERT INTO schema_migrations (version) VALUES ($1)`, [name]);
+        await client.query('COMMIT');
+        this.logger.log(`Migracion aplicada: ${name}`);
+      } catch (e) {
+        await client.query('ROLLBACK');
+        this.logger.error(`Migracion fallida: ${name}`, e as Error);
+        throw e;
+      } finally {
+        client.release();
+      }
+    }
   }
 
   private async ensureDefaultAdmin() {

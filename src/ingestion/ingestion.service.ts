@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
+import { createHash } from 'crypto';
 import { appendFile, mkdir, readFile, writeFile } from 'fs/promises';
 import type { PoolClient } from 'pg';
 import { join } from 'path';
@@ -34,6 +35,11 @@ export class IngestionService {
   async putCredenciales(deviceId: string, csv: string) {
     if (this.db.isEnabled()) {
       const rows = this.parseCsvByHeader(this.normalizeCsv(csv, CRED_HEADER), CRED_HEADER);
+      if (rows.length === 0) {
+        throw new BadRequestException(
+          'credenciales sin filas de datos: se rechaza para evitar vaciar la barrera',
+        );
+      }
       await this.db.withTransaction(async (client: PoolClient) => {
         await client.query(`DELETE FROM credenciales WHERE device_id = $1`, [deviceId]);
         for (const r of rows) {
@@ -219,6 +225,13 @@ export class IngestionService {
     return lines;
   }
 
+  /** Hash estable por fila para deduplicar POST (append) sin colisiones entre dispositivos. */
+  private ingestRowHash(parts: string[]) {
+    return createHash('sha256')
+      .update(parts.map((p) => p.trim()).join('|'), 'utf8')
+      .digest('hex');
+  }
+
   private parseCsvByHeader(csv: string, header: string) {
     const lines = csv
       .split(/\r?\n/)
@@ -239,67 +252,172 @@ export class IngestionService {
 
   private async insertEnergiaRows(deviceId: string, csv: string, replace: boolean) {
     const rows = this.parseCsvByHeader(this.normalizeCsv(csv, ENERGIA_HEADER), ENERGIA_HEADER);
+    let inserted = 0;
+    let skipped = 0;
     await this.db.withTransaction(async (client: PoolClient) => {
       if (replace) await client.query(`DELETE FROM log_energia WHERE device_id = $1`, [deviceId]);
       for (const r of rows) {
-        await client.query(
-          `INSERT INTO log_energia (device_id, timestamp_text, vs, cs, sw, vb, cb, lv, lc, lp)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-          [
-            deviceId,
-            (r.timestamp ?? '').trim(),
-            Number.parseFloat(r.VS ?? '0') || 0,
-            Number.parseFloat(r.CS ?? '0') || 0,
-            Number.parseFloat(r.SW ?? '0') || 0,
-            Number.parseFloat(r.VB ?? '0') || 0,
-            Number.parseFloat(r.CB ?? '0') || 0,
-            Number.parseFloat(r.LV ?? '0') || 0,
-            Number.parseFloat(r.LC ?? '0') || 0,
-            Number.parseFloat(r.LP ?? '0') || 0,
-          ],
-        );
+        const ts = (r.timestamp ?? '').trim();
+        const vs = Number.parseFloat(r.VS ?? '0') || 0;
+        const cs = Number.parseFloat(r.CS ?? '0') || 0;
+        const sw = Number.parseFloat(r.SW ?? '0') || 0;
+        const vb = Number.parseFloat(r.VB ?? '0') || 0;
+        const cb = Number.parseFloat(r.CB ?? '0') || 0;
+        const lv = Number.parseFloat(r.LV ?? '0') || 0;
+        const lc = Number.parseFloat(r.LC ?? '0') || 0;
+        const lp = Number.parseFloat(r.LP ?? '0') || 0;
+        const h = this.ingestRowHash([
+          deviceId,
+          ts,
+          String(vs),
+          String(cs),
+          String(sw),
+          String(vb),
+          String(cb),
+          String(lv),
+          String(lc),
+          String(lp),
+        ]);
+        if (replace) {
+          await client.query(
+            `INSERT INTO log_energia (device_id, timestamp_text, vs, cs, sw, vb, cb, lv, lc, lp, ingest_hash)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+            [deviceId, ts, vs, cs, sw, vb, cb, lv, lc, lp, h],
+          );
+          inserted += 1;
+        } else {
+          const res = await client.query(
+            `INSERT INTO log_energia (device_id, timestamp_text, vs, cs, sw, vb, cb, lv, lc, lp, ingest_hash)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+             ON CONFLICT (device_id, ingest_hash) DO NOTHING`,
+            [deviceId, ts, vs, cs, sw, vb, cb, lv, lc, lp, h],
+          );
+          if ((res.rowCount ?? 0) > 0) inserted += 1;
+          else skipped += 1;
+        }
       }
     });
-    return { ok: true, file: 'log_energia.csv', rows: rows.length, replace };
+    return {
+      ok: true,
+      file: 'log_energia.csv',
+      rows: rows.length,
+      replace,
+      inserted,
+      skipped: replace ? 0 : skipped,
+    };
   }
 
   private async insertEventosRows(deviceId: string, csv: string, replace: boolean) {
     const rows = this.parseCsvByHeader(this.normalizeCsv(csv, EVENTOS_HEADER), EVENTOS_HEADER);
+    let inserted = 0;
+    let skipped = 0;
     await this.db.withTransaction(async (client: PoolClient) => {
       if (replace) await client.query(`DELETE FROM log_eventos WHERE device_id = $1`, [deviceId]);
       for (const r of rows) {
-        await client.query(
-          `INSERT INTO log_eventos (device_id, fecha, id_persona, usuario_persona, id_vehiculo, usuario_vehiculo, resultado, direccion)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-          [
-            deviceId,
-            (r.fecha ?? '').trim(),
-            (r.id_persona ?? '').trim(),
-            (r.usuario_persona ?? '').trim(),
-            (r.id_vehiculo ?? '').trim(),
-            (r.usuario_vehiculo ?? '').trim(),
-            (r.resultado ?? '').trim(),
-            (r.direccion ?? '').trim(),
-          ],
-        );
+        const fecha = (r.fecha ?? '').trim();
+        const idPersona = (r.id_persona ?? '').trim();
+        const usuarioPersona = (r.usuario_persona ?? '').trim();
+        const idVehiculo = (r.id_vehiculo ?? '').trim();
+        const usuarioVehiculo = (r.usuario_vehiculo ?? '').trim();
+        const resultado = (r.resultado ?? '').trim();
+        const direccion = (r.direccion ?? '').trim();
+        const h = this.ingestRowHash([
+          deviceId,
+          fecha,
+          idPersona,
+          usuarioPersona,
+          idVehiculo,
+          usuarioVehiculo,
+          resultado,
+          direccion,
+        ]);
+        if (replace) {
+          await client.query(
+            `INSERT INTO log_eventos (device_id, fecha, id_persona, usuario_persona, id_vehiculo, usuario_vehiculo, resultado, direccion, ingest_hash)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+            [
+              deviceId,
+              fecha,
+              idPersona,
+              usuarioPersona,
+              idVehiculo,
+              usuarioVehiculo,
+              resultado,
+              direccion,
+              h,
+            ],
+          );
+          inserted += 1;
+        } else {
+          const res = await client.query(
+            `INSERT INTO log_eventos (device_id, fecha, id_persona, usuario_persona, id_vehiculo, usuario_vehiculo, resultado, direccion, ingest_hash)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+             ON CONFLICT (device_id, ingest_hash) DO NOTHING`,
+            [
+              deviceId,
+              fecha,
+              idPersona,
+              usuarioPersona,
+              idVehiculo,
+              usuarioVehiculo,
+              resultado,
+              direccion,
+              h,
+            ],
+          );
+          if ((res.rowCount ?? 0) > 0) inserted += 1;
+          else skipped += 1;
+        }
       }
     });
-    return { ok: true, file: 'log_eventos.csv', rows: rows.length, replace };
+    return {
+      ok: true,
+      file: 'log_eventos.csv',
+      rows: rows.length,
+      replace,
+      inserted,
+      skipped: replace ? 0 : skipped,
+    };
   }
 
   private async insertHwRows(deviceId: string, csv: string, replace: boolean) {
     const rows = this.parseCsvByHeader(this.normalizeCsv(csv, HW_HEADER), HW_HEADER);
+    let inserted = 0;
+    let skipped = 0;
     await this.db.withTransaction(async (client: PoolClient) => {
       if (replace) await client.query(`DELETE FROM log_hw WHERE device_id = $1`, [deviceId]);
       for (const r of rows) {
-        await client.query(
-          `INSERT INTO log_hw (device_id, fecha, lectora, evento)
-           VALUES ($1,$2,$3,$4)`,
-          [deviceId, (r.fecha ?? '').trim(), (r.lectora ?? '').trim(), (r.evento ?? '').trim()],
-        );
+        const fecha = (r.fecha ?? '').trim();
+        const lectora = (r.lectora ?? '').trim();
+        const evento = (r.evento ?? '').trim();
+        const h = this.ingestRowHash([deviceId, fecha, lectora, evento]);
+        if (replace) {
+          await client.query(
+            `INSERT INTO log_hw (device_id, fecha, lectora, evento, ingest_hash)
+             VALUES ($1,$2,$3,$4,$5)`,
+            [deviceId, fecha, lectora, evento, h],
+          );
+          inserted += 1;
+        } else {
+          const res = await client.query(
+            `INSERT INTO log_hw (device_id, fecha, lectora, evento, ingest_hash)
+             VALUES ($1,$2,$3,$4,$5)
+             ON CONFLICT (device_id, ingest_hash) DO NOTHING`,
+            [deviceId, fecha, lectora, evento, h],
+          );
+          if ((res.rowCount ?? 0) > 0) inserted += 1;
+          else skipped += 1;
+        }
       }
     });
-    return { ok: true, file: 'log_hw.csv', rows: rows.length, replace };
+    return {
+      ok: true,
+      file: 'log_hw.csv',
+      rows: rows.length,
+      replace,
+      inserted,
+      skipped: replace ? 0 : skipped,
+    };
   }
 
   private async appendCsv(
