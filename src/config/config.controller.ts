@@ -1,32 +1,15 @@
-import {
-  Body,
-  Controller,
-  Get,
-  Headers,
-  Param,
-  Put,
-  UnauthorizedException,
-} from '@nestjs/common';
+import { Body, Controller, Get, Headers, Param, Put } from '@nestjs/common';
+import { AuthService } from '../auth/auth.service';
 import type { DeviceRegistryFile } from './device-registry.types';
 import type { ModulesConfigFile } from './modules-config.types';
 import { ConfigService } from './config.service';
 
 @Controller('config')
 export class ConfigController {
-  constructor(private readonly config: ConfigService) {}
-
-  private assertSecret(headers: Record<string, string | string[] | undefined>) {
-    const expected = process.env.INGESTION_SECRET?.trim();
-    if (!expected) return;
-    const auth = headers['authorization'];
-    const token =
-      typeof auth === 'string' && auth.startsWith('Bearer ')
-        ? auth.slice(7).trim()
-        : '';
-    if (token !== expected) {
-      throw new UnauthorizedException('token invalido');
-    }
-  }
+  constructor(
+    private readonly config: ConfigService,
+    private readonly auth: AuthService,
+  ) {}
 
   @Get('devices')
   async listDevices() {
@@ -38,7 +21,7 @@ export class ConfigController {
     @Headers() headers: Record<string, string | string[] | undefined>,
     @Body() body: DeviceRegistryFile,
   ) {
-    this.assertSecret(headers);
+    this.auth.assertPlatformBearer(headers);
     return this.config.save(body);
   }
 
@@ -57,7 +40,7 @@ export class ConfigController {
     @Headers() headers: Record<string, string | string[] | undefined>,
     @Body() body: ModulesConfigFile,
   ) {
-    this.assertSecret(headers);
+    this.auth.assertPlatformBearer(headers);
     return this.config.saveModulesConfig(body);
   }
 }

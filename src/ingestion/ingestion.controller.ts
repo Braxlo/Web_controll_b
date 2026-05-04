@@ -10,11 +10,11 @@ import {
   Query,
   Req,
   Res,
-  UnauthorizedException,
   Logger,
 } from '@nestjs/common';
 import type { Response } from 'express';
 import type { Request } from 'express';
+import { AuthService } from '../auth/auth.service';
 import { IngestionService } from './ingestion.service';
 
 type CsvBody = { csv: string };
@@ -24,7 +24,10 @@ type CredBody = { id: string; tipo: 'p' | 'v'; nivel: number; usuario?: string }
 export class IngestionController {
   private readonly logger = new Logger(IngestionController.name);
 
-  constructor(private readonly ingestion: IngestionService) {}
+  constructor(
+    private readonly ingestion: IngestionService,
+    private readonly auth: AuthService,
+  ) {}
 
   private getClientIp(req: Request) {
     const forwarded = req.headers['x-forwarded-for'];
@@ -90,19 +93,6 @@ export class IngestionController {
     }
   }
 
-  private assertSecret(headers: Record<string, string | string[] | undefined>) {
-    const expected = process.env.INGESTION_SECRET?.trim();
-    if (!expected) return;
-    const auth = headers['authorization'];
-    const token =
-      typeof auth === 'string' && auth.startsWith('Bearer ')
-        ? auth.slice(7).trim()
-        : '';
-    if (token !== expected) {
-      throw new UnauthorizedException('token de ingestion invalido');
-    }
-  }
-
   private parseLimit(raw?: string) {
     const n = Number.parseInt(String(raw ?? '500'), 10);
     if (!Number.isFinite(n) || n < 1) return 500;
@@ -116,7 +106,7 @@ export class IngestionController {
     @Headers() headers: Record<string, string | string[] | undefined>,
     @Req() req: Request,
   ) {
-    this.assertSecret(headers);
+    this.auth.assertPlatformBearer(headers);
     return this.withIngestLog(req, deviceId, () =>
       this.ingestion.readLog(deviceId, 'log_energia.csv', this.parseLimit(limit)),
     );
@@ -129,7 +119,7 @@ export class IngestionController {
     @Headers() headers: Record<string, string | string[] | undefined>,
     @Req() req: Request,
   ) {
-    this.assertSecret(headers);
+    this.auth.assertPlatformBearer(headers);
     return this.withIngestLog(req, deviceId, () =>
       this.ingestion.readLog(deviceId, 'log_eventos.csv', this.parseLimit(limit)),
     );
@@ -142,7 +132,7 @@ export class IngestionController {
     @Headers() headers: Record<string, string | string[] | undefined>,
     @Req() req: Request,
   ) {
-    this.assertSecret(headers);
+    this.auth.assertPlatformBearer(headers);
     return this.withIngestLog(req, deviceId, () =>
       this.ingestion.readLog(deviceId, 'log_hw.csv', this.parseLimit(limit)),
     );
@@ -156,7 +146,7 @@ export class IngestionController {
     @Res() res: Response,
     @Req() req: Request,
   ) {
-    this.assertSecret(headers);
+    this.auth.assertPlatformBearer(headers);
     await this.withIngestLog(req, deviceId, async () => {
       const text = await this.ingestion.readRawFile(deviceId, 'credenciales.csv');
       const body = text.trim().length > 0 ? text : 'id,tipo,nivel,usuario\n';
@@ -172,7 +162,7 @@ export class IngestionController {
     @Headers() headers: Record<string, string | string[] | undefined>,
     @Req() req: Request,
   ) {
-    this.assertSecret(headers);
+    this.auth.assertPlatformBearer(headers);
     return this.withIngestLog(req, deviceId, () =>
       this.ingestion.readLog(deviceId, 'credenciales.csv', 5000),
     );
@@ -185,7 +175,7 @@ export class IngestionController {
     @Headers() headers: Record<string, string | string[] | undefined>,
     @Req() req: Request,
   ) {
-    this.assertSecret(headers);
+    this.auth.assertPlatformBearer(headers);
     return this.withIngestLog(req, deviceId, () =>
       this.ingestion.listCredenciales(deviceId),
     );
@@ -198,7 +188,7 @@ export class IngestionController {
     @Body() body: CredBody,
     @Req() req: Request,
   ) {
-    this.assertSecret(headers);
+    this.auth.assertPlatformBearer(headers);
     return this.withIngestLog(req, deviceId, () =>
       this.ingestion.upsertCredencial(deviceId, body),
     );
@@ -211,7 +201,7 @@ export class IngestionController {
     @Headers() headers: Record<string, string | string[] | undefined>,
     @Req() req: Request,
   ) {
-    this.assertSecret(headers);
+    this.auth.assertPlatformBearer(headers);
     return this.withIngestLog(req, deviceId, () =>
       this.ingestion.deleteCredencial(deviceId, id),
     );
@@ -224,7 +214,7 @@ export class IngestionController {
     @Body() body: CsvBody,
     @Req() req: Request,
   ) {
-    this.assertSecret(headers);
+    this.auth.assertPlatformBearer(headers);
     return this.withIngestLog(req, deviceId, () =>
       this.ingestion.putCredenciales(deviceId, body?.csv ?? ''),
     );
@@ -237,7 +227,7 @@ export class IngestionController {
     @Body() body: CsvBody,
     @Req() req: Request,
   ) {
-    this.assertSecret(headers);
+    this.auth.assertPlatformBearer(headers);
     return this.withIngestLog(req, deviceId, () =>
       this.ingestion.appendEnergia(deviceId, body?.csv ?? ''),
     );
@@ -250,7 +240,7 @@ export class IngestionController {
     @Body() body: CsvBody,
     @Req() req: Request,
   ) {
-    this.assertSecret(headers);
+    this.auth.assertPlatformBearer(headers);
     return this.withIngestLog(req, deviceId, () =>
       this.ingestion.putEnergia(deviceId, body?.csv ?? ''),
     );
@@ -263,7 +253,7 @@ export class IngestionController {
     @Body() body: CsvBody,
     @Req() req: Request,
   ) {
-    this.assertSecret(headers);
+    this.auth.assertPlatformBearer(headers);
     return this.withIngestLog(req, deviceId, () =>
       this.ingestion.appendEventos(deviceId, body?.csv ?? ''),
     );
@@ -276,7 +266,7 @@ export class IngestionController {
     @Body() body: CsvBody,
     @Req() req: Request,
   ) {
-    this.assertSecret(headers);
+    this.auth.assertPlatformBearer(headers);
     return this.withIngestLog(req, deviceId, () =>
       this.ingestion.putEventos(deviceId, body?.csv ?? ''),
     );
@@ -289,7 +279,7 @@ export class IngestionController {
     @Body() body: CsvBody,
     @Req() req: Request,
   ) {
-    this.assertSecret(headers);
+    this.auth.assertPlatformBearer(headers);
     return this.withIngestLog(req, deviceId, () =>
       this.ingestion.appendHardware(deviceId, body?.csv ?? ''),
     );
@@ -302,7 +292,7 @@ export class IngestionController {
     @Body() body: CsvBody,
     @Req() req: Request,
   ) {
-    this.assertSecret(headers);
+    this.auth.assertPlatformBearer(headers);
     return this.withIngestLog(req, deviceId, () =>
       this.ingestion.putHardware(deviceId, body?.csv ?? ''),
     );
