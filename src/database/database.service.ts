@@ -100,6 +100,7 @@ export class DatabaseService {
       'log_energia',
       'log_eventos',
       'log_hw',
+      'device_live_state',
     ] as const;
 
     const existing = await this.pool.query<{ tablename: string }>(
@@ -300,6 +301,22 @@ export class DatabaseService {
         created_at TIMESTAMPTZ NOT NULL DEFAULT now()
       );
     `);
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS device_live_state (
+        device_id TEXT PRIMARY KEY,
+        energia_total_rows BIGINT NOT NULL DEFAULT 0,
+        energia_last JSONB NULL,
+        energia_last_at TEXT NULL,
+        accesos_total_rows BIGINT NOT NULL DEFAULT 0,
+        accesos_ok_ultimas_24h INT NOT NULL DEFAULT 0,
+        accesos_last JSONB NULL,
+        accesos_last_at TEXT NULL,
+        hardware_total_rows BIGINT NOT NULL DEFAULT 0,
+        hardware_last JSONB NULL,
+        hardware_last_at TEXT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `);
     await this.pool.query(
       `CREATE INDEX IF NOT EXISTS idx_log_energia_device_pk ON log_energia(device_id, pk DESC);`,
     );
@@ -309,9 +326,12 @@ export class DatabaseService {
     await this.pool.query(
       `CREATE INDEX IF NOT EXISTS idx_log_hw_device_pk ON log_hw(device_id, pk DESC);`,
     );
+    await this.pool.query(
+      `CREATE INDEX IF NOT EXISTS idx_device_live_state_updated_at ON device_live_state(updated_at DESC);`,
+    );
     await this.ensureDefaultAdmin();
     this.logger.log(
-      'Esquema DB verificado: devices_registry, modules_config, admin_users, credenciales, log_energia, log_eventos, log_hw.',
+      'Esquema DB verificado: devices_registry, modules_config, admin_users, credenciales, log_energia, log_eventos, log_hw, device_live_state.',
     );
   }
 }

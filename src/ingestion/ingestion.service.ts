@@ -62,6 +62,43 @@ export type BarrierIngestSummary = {
   };
 };
 
+/** Snapshot rapido para dashboard (ultimo dato + contadores). */
+export type BarrierIngestLive = {
+  deviceId: string;
+  generatedAt: string;
+  updatedAt: string | null;
+  source: 'db_live_state' | 'computed';
+  energia: {
+    totalRows: number;
+    last: BarrierIngestSummary['energia']['last'];
+  };
+  accesos: {
+    totalRows: number;
+    accesosOkUltimas24h: number;
+    last:
+      | {
+          fecha: string;
+          id_persona: string;
+          usuario_persona: string;
+          id_vehiculo: string;
+          usuario_vehiculo: string;
+          resultado: string;
+          direccion: string;
+        }
+      | null;
+  };
+  hardware: {
+    totalRows: number;
+    last:
+      | {
+          fecha: string;
+          lectora: string;
+          evento: string;
+        }
+      | null;
+  };
+};
+
 @Injectable()
 export class IngestionService {
   constructor(
@@ -236,6 +273,7 @@ export class IngestionService {
   async appendEnergia(deviceId: string, csv: string) {
     if (this.db.isEnabled()) {
       const out = await this.insertEnergiaRows(deviceId, csv, false);
+      await this.refreshEnergiaLiveDb(deviceId);
       await this.touchDeviceSeen(deviceId);
       return out;
     }
@@ -252,6 +290,7 @@ export class IngestionService {
   async appendEventos(deviceId: string, csv: string) {
     if (this.db.isEnabled()) {
       const out = await this.insertEventosRows(deviceId, csv, false);
+      await this.refreshAccesosLiveDb(deviceId);
       await this.touchDeviceSeen(deviceId);
       return out;
     }
@@ -268,6 +307,7 @@ export class IngestionService {
   async appendHardware(deviceId: string, csv: string) {
     if (this.db.isEnabled()) {
       const out = await this.insertHwRows(deviceId, csv, false);
+      await this.refreshHardwareLiveDb(deviceId);
       await this.touchDeviceSeen(deviceId);
       return out;
     }
@@ -279,6 +319,7 @@ export class IngestionService {
   async putEnergia(deviceId: string, csv: string) {
     if (this.db.isEnabled()) {
       const out = await this.insertEnergiaRows(deviceId, csv, true);
+      await this.refreshEnergiaLiveDb(deviceId);
       await this.touchDeviceSeen(deviceId);
       return out;
     }
@@ -295,6 +336,7 @@ export class IngestionService {
   async putEventos(deviceId: string, csv: string) {
     if (this.db.isEnabled()) {
       const out = await this.insertEventosRows(deviceId, csv, true);
+      await this.refreshAccesosLiveDb(deviceId);
       await this.touchDeviceSeen(deviceId);
       return out;
     }
@@ -311,6 +353,7 @@ export class IngestionService {
   async putHardware(deviceId: string, csv: string) {
     if (this.db.isEnabled()) {
       const out = await this.insertHwRows(deviceId, csv, true);
+      await this.refreshHardwareLiveDb(deviceId);
       await this.touchDeviceSeen(deviceId);
       return out;
     }
@@ -884,6 +927,242 @@ export class IngestionService {
       if (d && d.getTime() >= cutoff) n += 1;
     }
     return n;
+  }
+
+  private mapAccesoLastFromRow(row: Record<string, unknown> | undefined) {
+    if (!row) return null;
+    const fecha = String((row as any).fecha ?? '').trim();
+    if (!fecha) return null;
+    return {
+      fecha,
+      id_persona: String((row as any).id_persona ?? ''),
+      usuario_persona: String((row as any).usuario_persona ?? ''),
+      id_vehiculo: String((row as any).id_vehiculo ?? ''),
+      usuario_vehiculo: String((row as any).usuario_vehiculo ?? ''),
+      resultado: String((row as any).resultado ?? ''),
+      direccion: String((row as any).direccion ?? ''),
+    };
+  }
+
+  private mapHwLastFromRow(row: Record<string, unknown> | undefined) {
+    if (!row) return null;
+    const fecha = String((row as any).fecha ?? '').trim();
+    if (!fecha) return null;
+    return {
+      fecha,
+      lectora: String((row as any).lectora ?? ''),
+      evento: String((row as any).evento ?? ''),
+    };
+  }
+
+  private async refreshEnergiaLiveDb(deviceId: string) {
+    if (!this.db.isEnabled()) return;
+    const [lastR, countR] = await Promise.all([
+      this.db.query<{
+        timestamp: string;
+        VS: number;
+        CS: number;
+        SW: number;
+        VB: number;
+        CB: number;
+        LV: number;
+        LC: number;
+        LP: number;
+      }>(
+        `SELECT timestamp_text AS "timestamp", vs AS "VS", cs AS "CS", sw AS "SW", vb AS "VB", cb AS "CB", lv AS "LV", lc AS "LC", lp AS "LP"
+           FROM log_energia
+          WHERE device_id = $1
+          ORDER BY pk DESC
+          LIMIT 1`,
+        [deviceId],
+      ),
+      this.db.query<{ c: string }>(
+        `SELECT count(*)::text AS c FROM log_energia WHERE device_id = $1`,
+        [deviceId],
+      ),
+    ]);
+    const last = this.mapEnergiaLastFromRow(
+      lastR.rows[0] as Record<string, unknown> | undefined,
+    );
+    const total = Number.parseInt(countR.rows[0]?.c ?? '0', 10) || 0;
+    await this.db.query(
+      `INSERT INTO device_live_state (device_id, energia_total_rows, energia_last, energia_last_at, updated_at)
+       VALUES ($1, $2, $3::jsonb, $4, now())
+       ON CONFLICT (device_id) DO UPDATE
+       SET energia_total_rows = EXCLUDED.energia_total_rows,
+           energia_last = EXCLUDED.energia_last,
+           energia_last_at = EXCLUDED.energia_last_at,
+           updated_at = now()`,
+      [deviceId, total, last ? JSON.stringify(last) : null, last?.timestamp ?? null],
+    );
+  }
+
+  private async refreshAccesosLiveDb(deviceId: string) {
+    if (!this.db.isEnabled()) return;
+    const [lastR, countR, okR] = await Promise.all([
+      this.db.query<{
+        fecha: string;
+        id_persona: string;
+        usuario_persona: string;
+        id_vehiculo: string;
+        usuario_vehiculo: string;
+        resultado: string;
+        direccion: string;
+      }>(
+        `SELECT fecha, id_persona, usuario_persona, id_vehiculo, usuario_vehiculo, resultado, direccion
+           FROM log_eventos
+          WHERE device_id = $1
+          ORDER BY pk DESC
+          LIMIT 1`,
+        [deviceId],
+      ),
+      this.db.query<{ c: string }>(
+        `SELECT count(*)::text AS c FROM log_eventos WHERE device_id = $1`,
+        [deviceId],
+      ),
+      this.db.query<{ c: string }>(
+        `SELECT count(*)::text AS c FROM log_eventos
+         WHERE device_id = $1
+           AND lower(trim(resultado)) LIKE 'ok%'
+           AND fecha ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}'
+           AND (fecha::timestamp without time zone) >= (now() - interval '24 hours')`,
+        [deviceId],
+      ),
+    ]);
+    const last = this.mapAccesoLastFromRow(
+      lastR.rows[0] as Record<string, unknown> | undefined,
+    );
+    const total = Number.parseInt(countR.rows[0]?.c ?? '0', 10) || 0;
+    const ok24 = Number.parseInt(okR.rows[0]?.c ?? '0', 10) || 0;
+    await this.db.query(
+      `INSERT INTO device_live_state (device_id, accesos_total_rows, accesos_ok_ultimas_24h, accesos_last, accesos_last_at, updated_at)
+       VALUES ($1, $2, $3, $4::jsonb, $5, now())
+       ON CONFLICT (device_id) DO UPDATE
+       SET accesos_total_rows = EXCLUDED.accesos_total_rows,
+           accesos_ok_ultimas_24h = EXCLUDED.accesos_ok_ultimas_24h,
+           accesos_last = EXCLUDED.accesos_last,
+           accesos_last_at = EXCLUDED.accesos_last_at,
+           updated_at = now()`,
+      [deviceId, total, ok24, last ? JSON.stringify(last) : null, last?.fecha ?? null],
+    );
+  }
+
+  private async refreshHardwareLiveDb(deviceId: string) {
+    if (!this.db.isEnabled()) return;
+    const [lastR, countR] = await Promise.all([
+      this.db.query<{ fecha: string; lectora: string; evento: string }>(
+        `SELECT fecha, lectora, evento
+           FROM log_hw
+          WHERE device_id = $1
+          ORDER BY pk DESC
+          LIMIT 1`,
+        [deviceId],
+      ),
+      this.db.query<{ c: string }>(
+        `SELECT count(*)::text AS c FROM log_hw WHERE device_id = $1`,
+        [deviceId],
+      ),
+    ]);
+    const last = this.mapHwLastFromRow(
+      lastR.rows[0] as Record<string, unknown> | undefined,
+    );
+    const total = Number.parseInt(countR.rows[0]?.c ?? '0', 10) || 0;
+    await this.db.query(
+      `INSERT INTO device_live_state (device_id, hardware_total_rows, hardware_last, hardware_last_at, updated_at)
+       VALUES ($1, $2, $3::jsonb, $4, now())
+       ON CONFLICT (device_id) DO UPDATE
+       SET hardware_total_rows = EXCLUDED.hardware_total_rows,
+           hardware_last = EXCLUDED.hardware_last,
+           hardware_last_at = EXCLUDED.hardware_last_at,
+           updated_at = now()`,
+      [deviceId, total, last ? JSON.stringify(last) : null, last?.fecha ?? null],
+    );
+  }
+
+  private async readBarrierIngestLiveDb(
+    deviceId: string,
+  ): Promise<BarrierIngestLive | null> {
+    if (!this.db.isEnabled()) return null;
+    const rs = await this.db.query<{
+      device_id: string;
+      energia_total_rows: string | number;
+      energia_last: Record<string, unknown> | null;
+      accesos_total_rows: string | number;
+      accesos_ok_ultimas_24h: number;
+      accesos_last: Record<string, unknown> | null;
+      hardware_total_rows: string | number;
+      hardware_last: Record<string, unknown> | null;
+      updated_at: string | null;
+    }>(
+      `SELECT device_id, energia_total_rows, energia_last, accesos_total_rows, accesos_ok_ultimas_24h, accesos_last, hardware_total_rows, hardware_last, updated_at
+         FROM device_live_state
+        WHERE device_id = $1`,
+      [deviceId],
+    );
+    const row = rs.rows[0];
+    if (!row) return null;
+    return {
+      deviceId,
+      generatedAt: new Date().toISOString(),
+      updatedAt: row.updated_at ?? null,
+      source: 'db_live_state',
+      energia: {
+        totalRows: Number.parseInt(String(row.energia_total_rows ?? '0'), 10) || 0,
+        last: this.mapEnergiaLastFromRow(row.energia_last ?? undefined),
+      },
+      accesos: {
+        totalRows: Number.parseInt(String(row.accesos_total_rows ?? '0'), 10) || 0,
+        accesosOkUltimas24h: Number(row.accesos_ok_ultimas_24h ?? 0) || 0,
+        last: this.mapAccesoLastFromRow(row.accesos_last ?? undefined),
+      },
+      hardware: {
+        totalRows: Number.parseInt(String(row.hardware_total_rows ?? '0'), 10) || 0,
+        last: this.mapHwLastFromRow(row.hardware_last ?? undefined),
+      },
+    };
+  }
+
+  async getBarrierIngestLive(deviceId: string): Promise<BarrierIngestLive> {
+    this.devicePath(deviceId);
+    if (this.db.isEnabled()) {
+      let live = await this.readBarrierIngestLiveDb(deviceId);
+      if (!live) {
+        await Promise.all([
+          this.refreshEnergiaLiveDb(deviceId),
+          this.refreshAccesosLiveDb(deviceId),
+          this.refreshHardwareLiveDb(deviceId),
+        ]);
+        live = await this.readBarrierIngestLiveDb(deviceId);
+      }
+      if (live) return live;
+    }
+    const sum = await this.getBarrierIngestSummary(deviceId, {
+      eventosLimit: 1,
+      hwLimit: 1,
+    });
+    return {
+      deviceId,
+      generatedAt: new Date().toISOString(),
+      updatedAt:
+        sum.energia.last?.timestamp ??
+        sum.accesos.recent[0]?.fecha ??
+        sum.hardware.recent[0]?.fecha ??
+        null,
+      source: 'computed',
+      energia: {
+        totalRows: sum.energia.totalRows,
+        last: sum.energia.last,
+      },
+      accesos: {
+        totalRows: sum.accesos.totalRows,
+        accesosOkUltimas24h: sum.accesos.accesosOkUltimas24h,
+        last: sum.accesos.recent[0] ?? null,
+      },
+      hardware: {
+        totalRows: sum.hardware.totalRows,
+        last: sum.hardware.recent[0] ?? null,
+      },
+    };
   }
 
   private async getBarrierIngestSummaryDb(

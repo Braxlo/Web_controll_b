@@ -97,6 +97,7 @@ Misma regla de `Authorization` si `INGESTION_SECRET` está definido.
 | **GET** | `.../log-hw` | `limit` | idem |
 | **GET** | `.../credenciales` | — | idem (hasta 5000 filas, JSON) |
 | **GET** | `.../credenciales/raw` | — | Cuerpo **text/csv** completo (para que la Raspberry sobrescriba `credenciales.csv` local) |
+| **GET** | `.../live` | — | Snapshot rápido `{ energia/accesos/hardware: totalRows + last }` (optimizado para dashboard) |
 
 `rows` son objetos `{ cabecera: valor }` por fila (últimas `limit` filas de datos).
 

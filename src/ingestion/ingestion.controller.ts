@@ -125,6 +125,19 @@ export class IngestionController {
     );
   }
 
+  /** Snapshot rapido para UI: ultimo log y contadores precalculados. */
+  @Get(':deviceId/live')
+  getBarrierLive(
+    @Param('deviceId') deviceId: string,
+    @Headers() headers: Record<string, string | string[] | undefined>,
+    @Req() req: Request,
+  ) {
+    this.auth.assertPlatformBearer(headers);
+    return this.withIngestLog(req, deviceId, () =>
+      this.ingestion.getBarrierIngestLive(deviceId),
+    );
+  }
+
   @Get(':deviceId/log-energia')
   getEnergia(
     @Param('deviceId') deviceId: string,
