@@ -295,46 +295,39 @@ export class ConfigService {
 
   async load(): Promise<DeviceRegistryFile> {
     if (this.db.isEnabled()) {
-      try {
-        const rs = await this.db.query<{
-          device_id: string;
-          name: string;
-          host: string;
-          panel_port: number;
-          api_key: string;
-          connection_status: 'pending' | 'online' | 'offline';
-          last_seen_at: string | null;
-          credentials_version: number;
-          credentials_sync_status: 'pending' | 'synced' | 'error';
-        }>(
-          `SELECT device_id, name, host, panel_port, api_key, connection_status, last_seen_at, credentials_version, credentials_sync_status
-             FROM devices_registry
-            ORDER BY device_id ASC`,
-        );
-        const devices = rs.rows.map((r) =>
-          this.validateDevice({
-            deviceId: r.device_id,
-            name: r.name,
-            host: r.host,
-            panelPort: r.panel_port,
-            apiKey: r.api_key,
-            connectionStatus: r.connection_status,
-            lastSeenAt: r.last_seen_at ?? undefined,
-            credentialsVersion: r.credentials_version,
-            credentialsSyncStatus: r.credentials_sync_status,
-          }),
-        );
-        if (devices.length === 0) {
-          return structuredClone(DEFAULT_REGISTRY);
-        }
-        return { devices };
-      } catch (error) {
-        const msg =
-          error instanceof Error ? error.message : 'error desconocido';
-        this.logger.warn(
-          `DB no disponible para devices_registry, usando archivo local: ${msg}`,
-        );
+      /** Sin fallback silencioso al JSON: si la guardada es en PostgreSQL, leer archivo vacío haría “desaparecer” barreras en el panel. */
+      const rs = await this.db.query<{
+        device_id: string;
+        name: string;
+        host: string;
+        panel_port: number;
+        api_key: string;
+        connection_status: 'pending' | 'online' | 'offline';
+        last_seen_at: string | null;
+        credentials_version: number;
+        credentials_sync_status: 'pending' | 'synced' | 'error';
+      }>(
+        `SELECT device_id, name, host, panel_port, api_key, connection_status, last_seen_at, credentials_version, credentials_sync_status
+           FROM devices_registry
+          ORDER BY device_id ASC`,
+      );
+      const devices = rs.rows.map((r) =>
+        this.validateDevice({
+          deviceId: r.device_id,
+          name: r.name,
+          host: r.host,
+          panelPort: r.panel_port,
+          apiKey: r.api_key,
+          connectionStatus: r.connection_status,
+          lastSeenAt: r.last_seen_at ?? undefined,
+          credentialsVersion: r.credentials_version,
+          credentialsSyncStatus: r.credentials_sync_status,
+        }),
+      );
+      if (devices.length === 0) {
+        return structuredClone(DEFAULT_REGISTRY);
       }
+      return { devices };
     }
 
     await mkdir(join(this.registryPath, '..'), { recursive: true });
@@ -420,23 +413,15 @@ export class ConfigService {
 
   async loadModulesConfig(): Promise<ModulesConfigFile> {
     if (this.db.isEnabled()) {
-      try {
-        const rs = await this.db.query<{ config_value: ModulesConfigFile }>(
-          `SELECT config_value
-             FROM modules_config
-            WHERE config_key = $1`,
-          ['main'],
-        );
-        const row = rs.rows[0];
-        if (!row) return structuredClone(DEFAULT_MODULES_CONFIG);
-        return this.validateModulesConfig(row.config_value);
-      } catch (error) {
-        const msg =
-          error instanceof Error ? error.message : 'error desconocido';
-        this.logger.warn(
-          `DB no disponible para modules_config, usando archivo local: ${msg}`,
-        );
-      }
+      const rs = await this.db.query<{ config_value: ModulesConfigFile }>(
+        `SELECT config_value
+           FROM modules_config
+          WHERE config_key = $1`,
+        ['main'],
+      );
+      const row = rs.rows[0];
+      if (!row) return structuredClone(DEFAULT_MODULES_CONFIG);
+      return this.validateModulesConfig(row.config_value);
     }
 
     await mkdir(join(this.modulesConfigPath, '..'), { recursive: true });
