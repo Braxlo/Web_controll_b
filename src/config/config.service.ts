@@ -525,6 +525,20 @@ export class ConfigService {
 
   async markDeviceOnline(deviceId: string, at?: string) {
     const now = at ?? new Date().toISOString();
+    const { devices } = await this.load();
+    const d = devices.find((x) => x.deviceId === deviceId);
+    if (!d) {
+      this.logger.warn(
+        `markDeviceOnline: dispositivo "${deviceId}" no está en el registro; omitiendo lastSeen en panel.`,
+      );
+      return {
+        ok: true,
+        deviceId,
+        connectionStatus: 'online' as const,
+        lastSeenAt: now,
+        unregistered: true as const,
+      };
+    }
     await this.updateDeviceRuntime(deviceId, {
       connectionStatus: 'online',
       lastSeenAt: now,
@@ -536,7 +550,16 @@ export class ConfigService {
     const { devices } = await this.load();
     const d = devices.find((x) => x.deviceId === deviceId);
     if (!d) {
-      throw new NotFoundException(`dispositivo no encontrado: ${deviceId}`);
+      this.logger.warn(
+        `markCredentialsPending: dispositivo "${deviceId}" no está en el registro; se acepta la ingesta pero no se actualiza versión en panel. Registra el dispositivo en Configuración con el mismo deviceId.`,
+      );
+      return {
+        ok: true,
+        deviceId,
+        credentialsVersion: 1,
+        credentialsSyncStatus: 'pending' as const,
+        unregistered: true as const,
+      };
     }
     const nextVersion = Math.max(1, Number(d.credentialsVersion ?? 1)) + 1;
     await this.updateDeviceRuntime(deviceId, {
@@ -555,21 +578,40 @@ export class ConfigService {
     deviceId: string,
     status: 'synced' | 'error' = 'synced',
   ) {
+    const { devices } = await this.load();
+    const d = devices.find((x) => x.deviceId === deviceId);
+    if (!d) {
+      this.logger.warn(
+        `markCredentialsSynced: dispositivo "${deviceId}" no está en el registro; omitiendo actualización de estado de sync.`,
+      );
+      return {
+        ok: true,
+        deviceId,
+        credentialsVersion: 1,
+        credentialsSyncStatus: status,
+        unregistered: true as const,
+      };
+    }
     await this.updateDeviceRuntime(deviceId, {
       credentialsSyncStatus: status,
       lastSeenAt: new Date().toISOString(),
       connectionStatus: status === 'synced' ? 'online' : 'offline',
     });
-    const { devices } = await this.load();
-    const d = devices.find((x) => x.deviceId === deviceId);
-    if (!d) {
-      throw new NotFoundException(`dispositivo no encontrado: ${deviceId}`);
+    const after = await this.load();
+    const d2 = after.devices.find((x) => x.deviceId === deviceId);
+    if (!d2) {
+      return {
+        ok: true,
+        deviceId,
+        credentialsVersion: 1,
+        credentialsSyncStatus: status,
+      };
     }
     return {
       ok: true,
       deviceId,
-      credentialsVersion: d.credentialsVersion ?? 1,
-      credentialsSyncStatus: d.credentialsSyncStatus ?? status,
+      credentialsVersion: d2.credentialsVersion ?? 1,
+      credentialsSyncStatus: d2.credentialsSyncStatus ?? status,
     };
   }
 
