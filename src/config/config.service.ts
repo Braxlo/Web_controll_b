@@ -131,14 +131,21 @@ export class ConfigService {
     return Math.floor(n);
   }
 
-  private normalizeLastSeenAt(value: RaspberryDevice['lastSeenAt']) {
-    const raw = (value ?? '').trim();
+  /**
+   * PostgreSQL (TIMESTAMPTZ) suele devolver `Date` en node-pg; antes se llamaba `.trim()` y lanzaba TypeError → HTTP 500 en GET /config/devices.
+   */
+  private normalizeLastSeenAt(
+    value: RaspberryDevice['lastSeenAt'] | Date | null | undefined,
+  ): string | undefined {
+    if (value === null || value === undefined) return undefined;
+    if (value instanceof Date) {
+      const t = value.getTime();
+      return Number.isFinite(t) ? value.toISOString() : undefined;
+    }
+    const raw = String(value).trim();
     if (!raw) return undefined;
     const d = new Date(raw);
-    if (!Number.isFinite(d.getTime())) {
-      throw new BadRequestException('lastSeenAt invalido');
-    }
-    return d.toISOString();
+    return Number.isFinite(d.getTime()) ? d.toISOString() : undefined;
   }
 
   private validateBarrierLocation(raw: unknown): BarrierLocation {
@@ -311,19 +318,29 @@ export class ConfigService {
            FROM devices_registry
           ORDER BY device_id ASC`,
       );
-      const devices = rs.rows.map((r) =>
-        this.validateDevice({
-          deviceId: r.device_id,
-          name: r.name,
-          host: r.host,
-          panelPort: r.panel_port,
-          apiKey: r.api_key,
-          connectionStatus: r.connection_status,
-          lastSeenAt: r.last_seen_at ?? undefined,
-          credentialsVersion: r.credentials_version,
-          credentialsSyncStatus: r.credentials_sync_status,
-        }),
-      );
+      const devices: RaspberryDevice[] = [];
+      for (const r of rs.rows) {
+        try {
+          devices.push(
+            this.validateDevice({
+              deviceId: r.device_id,
+              name: r.name,
+              host: r.host,
+              panelPort: Number(r.panel_port),
+              apiKey: r.api_key,
+              connectionStatus: r.connection_status,
+              lastSeenAt: r.last_seen_at ?? undefined,
+              credentialsVersion: r.credentials_version,
+              credentialsSyncStatus: r.credentials_sync_status,
+            }),
+          );
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.logger.warn(
+            `devices_registry: omitiendo fila ${String(r.device_id)} (${msg})`,
+          );
+        }
+      }
       if (devices.length === 0) {
         return structuredClone(DEFAULT_REGISTRY);
       }
