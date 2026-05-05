@@ -12,6 +12,56 @@ const EVENTOS_HEADER =
 const HW_HEADER = 'fecha,lectora,evento';
 const CRED_HEADER = 'id,tipo,nivel,usuario';
 
+/** Resumen JSON para el panel (credenciales, energía, accesos, hardware). */
+export type BarrierIngestSummary = {
+  deviceId: string;
+  generatedAt: string;
+  credenciales: {
+    totalRows: number;
+    preview: Array<{
+      id: string;
+      tipo: string;
+      nivel: number;
+      usuario: string;
+    }>;
+  };
+  energia: {
+    totalRows: number;
+    last: {
+      timestamp: string;
+      VS: number;
+      CS: number;
+      SW: number;
+      VB: number;
+      CB: number;
+      LV: number;
+      LC: number;
+      LP: number;
+    } | null;
+  };
+  accesos: {
+    totalRows: number;
+    accesosOkUltimas24h: number;
+    recent: Array<{
+      fecha: string;
+      id_persona: string;
+      usuario_persona: string;
+      id_vehiculo: string;
+      usuario_vehiculo: string;
+      resultado: string;
+      direccion: string;
+    }>;
+  };
+  hardware: {
+    totalRows: number;
+    recent: Array<{
+      fecha: string;
+      lectora: string;
+      evento: string;
+    }>;
+  };
+};
+
 @Injectable()
 export class IngestionService {
   constructor(
@@ -773,5 +823,299 @@ export class IngestionService {
     const lim = Number.isFinite(limit) ? limit : 500;
     const { columns, rows, totalRows } = this.parseCsvTail(raw, lim);
     return { deviceId, file: filename, columns, rows, totalRows };
+  }
+
+  async getBarrierIngestSummary(
+    deviceId: string,
+    opts?: { eventosLimit?: number; hwLimit?: number },
+  ): Promise<BarrierIngestSummary> {
+    this.devicePath(deviceId);
+    const eventosLimit = Math.min(Math.max(opts?.eventosLimit ?? 500, 1), 5000);
+    const hwLimit = Math.min(Math.max(opts?.hwLimit ?? 100, 1), 5000);
+    if (this.db.isEnabled()) {
+      return this.getBarrierIngestSummaryDb(deviceId, eventosLimit, hwLimit);
+    }
+    return this.getBarrierIngestSummaryFiles(deviceId, eventosLimit, hwLimit);
+  }
+
+  private mapEnergiaLastFromRow(
+    row: Record<string, unknown> | undefined,
+  ): BarrierIngestSummary['energia']['last'] {
+    if (!row) return null;
+    const num = (k: string) =>
+      Number.parseFloat(String((row as Record<string, unknown>)[k] ?? '0')) ||
+      0;
+    const ts = String(
+      (row as Record<string, unknown>).timestamp ??
+        (row as Record<string, unknown>).timestamp_text ??
+        '',
+    ).trim();
+    if (!ts) return null;
+    return {
+      timestamp: ts,
+      VS: num('VS'),
+      CS: num('CS'),
+      SW: num('SW'),
+      VB: num('VB'),
+      CB: num('CB'),
+      LV: num('LV'),
+      LC: num('LC'),
+      LP: num('LP'),
+    };
+  }
+
+  private parseLocalEventDate(raw: string): Date | null {
+    const s = (raw ?? '').trim();
+    if (!s) return null;
+    const normalized = s.includes('T')
+      ? s
+      : s.replace(/^(\d{4}-\d{2}-\d{2})\s+/, '$1T');
+    const d = new Date(normalized);
+    return Number.isFinite(d.getTime()) ? d : null;
+  }
+
+  private countOkAccesos24h(rows: Record<string, string>[]): number {
+    const cutoff = Date.now() - 24 * 3600_000;
+    let n = 0;
+    for (const r of rows) {
+      const res = (r.resultado ?? '').toLowerCase().trim();
+      if (!res.startsWith('ok')) continue;
+      const d = this.parseLocalEventDate(r.fecha ?? '');
+      if (d && d.getTime() >= cutoff) n += 1;
+    }
+    return n;
+  }
+
+  private async getBarrierIngestSummaryDb(
+    deviceId: string,
+    eventosLimit: number,
+    hwLimit: number,
+  ): Promise<BarrierIngestSummary> {
+    const credCountP = this.db.query<{ c: string }>(
+      `SELECT count(*)::text AS c FROM credenciales WHERE device_id = $1`,
+      [deviceId],
+    );
+    const credPreviewP = this.db.query<{
+      id: string;
+      tipo: string;
+      nivel: number;
+      usuario: string;
+    }>(
+      `SELECT id, tipo, nivel, usuario FROM credenciales WHERE device_id = $1 ORDER BY id ASC LIMIT 8`,
+      [deviceId],
+    );
+    const enLastP = this.db.query(
+      `SELECT timestamp_text AS "timestamp", vs AS "VS", cs AS "CS", sw AS "SW", vb AS "VB", cb AS "CB", lv AS "LV", lc AS "LC", lp AS "LP"
+         FROM log_energia WHERE device_id = $1 ORDER BY pk DESC LIMIT 1`,
+      [deviceId],
+    );
+    const enCountP = this.db.query<{ c: string }>(
+      `SELECT count(*)::text AS c FROM log_energia WHERE device_id = $1`,
+      [deviceId],
+    );
+    const evP = this.db.query<{
+      fecha: string;
+      id_persona: string;
+      usuario_persona: string;
+      id_vehiculo: string;
+      usuario_vehiculo: string;
+      resultado: string;
+      direccion: string;
+    }>(
+      `SELECT fecha, id_persona, usuario_persona, id_vehiculo, usuario_vehiculo, resultado, direccion
+         FROM log_eventos WHERE device_id = $1 ORDER BY pk DESC LIMIT $2`,
+      [deviceId, eventosLimit],
+    );
+    const evCountP = this.db.query<{ c: string }>(
+      `SELECT count(*)::text AS c FROM log_eventos WHERE device_id = $1`,
+      [deviceId],
+    );
+    const hwP = this.db.query<{
+      fecha: string;
+      lectora: string;
+      evento: string;
+    }>(
+      `SELECT fecha, lectora, evento FROM log_hw WHERE device_id = $1 ORDER BY pk DESC LIMIT $2`,
+      [deviceId, hwLimit],
+    );
+    const hwCountP = this.db.query<{ c: string }>(
+      `SELECT count(*)::text AS c FROM log_hw WHERE device_id = $1`,
+      [deviceId],
+    );
+
+    const [
+      credCount,
+      credPreview,
+      enLast,
+      enCount,
+      ev,
+      evCount,
+      hw,
+      hwCount,
+    ] = await Promise.all([
+      credCountP,
+      credPreviewP,
+      enLastP,
+      enCountP,
+      evP,
+      evCountP,
+      hwP,
+      hwCountP,
+    ]);
+
+    let accesosOkUltimas24h = 0;
+    try {
+      const okR = await this.db.query<{ c: string }>(
+        `SELECT count(*)::text AS c FROM log_eventos
+         WHERE device_id = $1
+           AND lower(trim(resultado)) LIKE 'ok%'
+           AND fecha ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}'
+           AND (fecha::timestamp without time zone) >= (now() - interval '24 hours')`,
+        [deviceId],
+      );
+      accesosOkUltimas24h =
+        Number.parseInt(okR.rows[0]?.c ?? '0', 10) || 0;
+    } catch {
+      accesosOkUltimas24h = this.countOkAccesos24h(
+        ev.rows.map((r) => ({
+          fecha: r.fecha,
+          id_persona: r.id_persona,
+          usuario_persona: r.usuario_persona,
+          id_vehiculo: r.id_vehiculo,
+          usuario_vehiculo: r.usuario_vehiculo,
+          resultado: r.resultado,
+          direccion: r.direccion,
+        })),
+      );
+    }
+
+    const recentEv = ev.rows.map((r) => ({
+      fecha: r.fecha,
+      id_persona: r.id_persona ?? '',
+      usuario_persona: r.usuario_persona ?? '',
+      id_vehiculo: r.id_vehiculo ?? '',
+      usuario_vehiculo: r.usuario_vehiculo ?? '',
+      resultado: r.resultado ?? '',
+      direccion: r.direccion ?? '',
+    }));
+
+    const recentHw = hw.rows.map((r) => ({
+      fecha: r.fecha,
+      lectora: r.lectora ?? '',
+      evento: r.evento ?? '',
+    }));
+
+    return {
+      deviceId,
+      generatedAt: new Date().toISOString(),
+      credenciales: {
+        totalRows: Number.parseInt(credCount.rows[0]?.c ?? '0', 10) || 0,
+        preview: credPreview.rows.map((r) => ({
+          id: r.id,
+          tipo: r.tipo,
+          nivel: Number(r.nivel) || 0,
+          usuario: r.usuario ?? '',
+        })),
+      },
+      energia: {
+        totalRows: Number.parseInt(enCount.rows[0]?.c ?? '0', 10) || 0,
+        last: this.mapEnergiaLastFromRow(enLast.rows[0] as Record<string, unknown>),
+      },
+      accesos: {
+        totalRows: Number.parseInt(evCount.rows[0]?.c ?? '0', 10) || 0,
+        accesosOkUltimas24h,
+        recent: recentEv,
+      },
+      hardware: {
+        totalRows: Number.parseInt(hwCount.rows[0]?.c ?? '0', 10) || 0,
+        recent: recentHw,
+      },
+    };
+  }
+
+  private async getBarrierIngestSummaryFiles(
+    deviceId: string,
+    eventosLimit: number,
+    hwLimit: number,
+  ): Promise<BarrierIngestSummary> {
+    const credCap = 5000;
+    const enCap = 5000;
+    const evCap = 5000;
+    const [cred, en, ev, hw] = await Promise.all([
+      this.readLog(deviceId, 'credenciales.csv', credCap),
+      this.readLog(deviceId, 'log_energia.csv', enCap),
+      this.readLog(deviceId, 'log_eventos.csv', evCap),
+      this.readLog(deviceId, 'log_hw.csv', hwLimit),
+    ]);
+
+    const preview = cred.rows.slice(0, 8).map((r) => ({
+      id: r.id ?? '',
+      tipo: r.tipo ?? '',
+      nivel: Number.parseInt(r.nivel ?? '0', 10) || 0,
+      usuario: r.usuario ?? '',
+    }));
+
+    const enRows = en.rows as Record<string, string>[];
+    const evRows = ev.rows as Record<string, string>[];
+    const hwRows = hw.rows as Record<string, string>[];
+
+    const lastEnRow =
+      enRows.length > 0 ? enRows[enRows.length - 1] : undefined;
+    const last = lastEnRow
+      ? this.mapEnergiaLastFromRow({
+          timestamp: lastEnRow.timestamp,
+          VS: lastEnRow.VS,
+          CS: lastEnRow.CS,
+          SW: lastEnRow.SW,
+          VB: lastEnRow.VB,
+          CB: lastEnRow.CB,
+          LV: lastEnRow.LV,
+          LC: lastEnRow.LC,
+          LP: lastEnRow.LP,
+        } as Record<string, unknown>)
+      : null;
+
+    const recentEvDesc = [...evRows]
+      .reverse()
+      .slice(0, eventosLimit)
+      .map((r) => ({
+        fecha: r.fecha ?? '',
+        id_persona: r.id_persona ?? '',
+        usuario_persona: r.usuario_persona ?? '',
+        id_vehiculo: r.id_vehiculo ?? '',
+        usuario_vehiculo: r.usuario_vehiculo ?? '',
+        resultado: r.resultado ?? '',
+        direccion: r.direccion ?? '',
+      }));
+
+    const accesosOkUltimas24h = this.countOkAccesos24h(evRows);
+
+    const recentHwDesc = [...hwRows].reverse().map((r) => ({
+      fecha: r.fecha ?? '',
+      lectora: r.lectora ?? '',
+      evento: r.evento ?? '',
+    }));
+
+    return {
+      deviceId,
+      generatedAt: new Date().toISOString(),
+      credenciales: {
+        totalRows: cred.totalRows,
+        preview,
+      },
+      energia: {
+        totalRows: en.totalRows,
+        last,
+      },
+      accesos: {
+        totalRows: ev.totalRows,
+        accesosOkUltimas24h,
+        recent: recentEvDesc,
+      },
+      hardware: {
+        totalRows: hw.totalRows,
+        recent: recentHwDesc,
+      },
+    };
   }
 }

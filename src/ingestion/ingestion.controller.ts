@@ -105,6 +105,26 @@ export class IngestionController {
     return Math.min(n, 5000);
   }
 
+  /** JSON agregado para el panel (credenciales, energía, accesos, hardware). */
+  @Get(':deviceId/summary')
+  getBarrierSummary(
+    @Param('deviceId') deviceId: string,
+    @Query('eventosLimit') eventosLimit: string | undefined,
+    @Query('hwLimit') hwLimit: string | undefined,
+    @Headers() headers: Record<string, string | string[] | undefined>,
+    @Req() req: Request,
+  ) {
+    this.auth.assertPlatformBearer(headers);
+    const ev = Number.parseInt(String(eventosLimit ?? '500'), 10);
+    const hw = Number.parseInt(String(hwLimit ?? '100'), 10);
+    return this.withIngestLog(req, deviceId, () =>
+      this.ingestion.getBarrierIngestSummary(deviceId, {
+        eventosLimit: Number.isFinite(ev) ? Math.min(Math.max(ev, 1), 5000) : 500,
+        hwLimit: Number.isFinite(hw) ? Math.min(Math.max(hw, 1), 5000) : 100,
+      }),
+    );
+  }
+
   @Get(':deviceId/log-energia')
   getEnergia(
     @Param('deviceId') deviceId: string,
