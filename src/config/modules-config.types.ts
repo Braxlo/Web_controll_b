@@ -17,7 +17,7 @@ export type BarrierLocation = {
 
 export type BarrierControlConfig = {
   area: string;
-  /** Si existe en `barriers.locations`, el servidor sincroniza `area` con el nombre de la ubicación. */
+  /** Si existe en `barriers.locations`, el servidor sincroniza `area` con el nombre del área (catálogo). */
   locationId?: string;
   topic: string;
   cmdOpen: string;

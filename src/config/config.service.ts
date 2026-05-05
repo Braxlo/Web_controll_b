@@ -146,12 +146,12 @@ export class ConfigService {
     const id = (o?.id ?? '').trim();
     if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
       throw new BadRequestException(
-        'id de ubicacion invalido: solo letras, numeros, guion y underscore',
+        'id de área inválido: solo letras, numeros, guion y underscore',
       );
     }
     const name = (o?.name ?? '').trim();
     if (!name) {
-      throw new BadRequestException('nombre de ubicacion requerido');
+      throw new BadRequestException('nombre de área requerido');
     }
     return { id, name };
   }
@@ -177,7 +177,7 @@ export class ConfigService {
       const loc = locationsById.get(locationId);
       if (!loc) {
         throw new BadRequestException(
-          `ubicacion '${locationId}' no existe (barrera ${id})`,
+          `área '${locationId}' no existe (barrera ${id})`,
         );
       }
       area = loc.name;
@@ -252,7 +252,7 @@ export class ConfigService {
     const seenLocIds = new Set<string>();
     for (const loc of locations) {
       if (seenLocIds.has(loc.id)) {
-        throw new BadRequestException(`ubicacion id duplicado: ${loc.id}`);
+        throw new BadRequestException(`id de área duplicado: ${loc.id}`);
       }
       seenLocIds.add(loc.id);
     }
